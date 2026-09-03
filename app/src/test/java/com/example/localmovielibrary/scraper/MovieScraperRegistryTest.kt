@@ -80,11 +80,16 @@ class MovieScraperRegistryTest {
     fun scrapeWithFallbackPrefersOfficialDmmActorImageOverJavdbAvatar() = runBlocking {
         val jdbAvatar = "https://c0.jdbstatic.com/avatars/yn/Yn256.jpg"
         val dmmAvatar = "https://awsimgsrc.dmm.co.jp/pics_dig/mono/actjpgs/actor.jpg"
+        val javbusAvatar = "https://www.javbus.com/pics/actress/actor.jpg"
         val registry = MovieScraperRegistry(
             listOf(
                 InfoMovieScraper(
                     ScrapeSource.Javdb,
                     ScrapedMovieInfo(number = "ABC-123", title = "标题", actors = listOf("演员甲"), actorImageUrls = mapOf("演员甲" to jdbAvatar))
+                ),
+                InfoMovieScraper(
+                    ScrapeSource.Javbus,
+                    ScrapedMovieInfo(number = "ABC-123", title = "标题", actors = listOf("演员甲"), actorImageUrls = mapOf("演员甲" to javbusAvatar))
                 ),
                 InfoMovieScraper(
                     ScrapeSource.Dmm2,
@@ -96,11 +101,12 @@ class MovieScraperRegistryTest {
         val info = registry.scrapeWithFallback(
             preferred = ScrapeSource.Javdb,
             number = "ABC-123",
-            fallbackOrder = listOf(ScrapeSource.Dmm2),
+            fallbackOrder = listOf(ScrapeSource.Javbus, ScrapeSource.Dmm2),
             collectAllSources = true
         )
 
         assertEquals(dmmAvatar, info.actorImageUrls["演员甲"])
+        assertEquals(listOf(dmmAvatar, jdbAvatar, javbusAvatar), info.actorImageCandidates["演员甲"])
     }
 
     @Test

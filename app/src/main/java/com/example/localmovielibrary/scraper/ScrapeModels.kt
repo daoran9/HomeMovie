@@ -35,7 +35,9 @@ data class ScrapedMovieInfo(
     val website: String = "",
     val source: String = "",
     val thumbUrl: String = "",
-    val posterUrl: String = ""
+    val posterUrl: String = "",
+    /** 同一演员来自多个资料源的头像候选，按下载优先级排序。 */
+    val actorImageCandidates: Map<String, List<String>> = emptyMap()
 )
 
 data class ActorAliasLookup(

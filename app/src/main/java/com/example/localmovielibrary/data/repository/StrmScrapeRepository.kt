@@ -30,6 +30,7 @@ import com.example.localmovielibrary.scraper.actorNamesMatch
 import com.example.localmovielibrary.scraper.dmmFanzaActorImageCandidates
 import com.example.localmovielibrary.scraper.isNonActorCategoryName
 import com.example.localmovielibrary.scraper.canonicalizeActorIdentities
+import com.example.localmovielibrary.scraper.prioritizeActorImageUrls
 import com.example.localmovielibrary.util.MovieVariant
 import com.example.localmovielibrary.util.detectMovieVariant
 import com.example.localmovielibrary.util.displayNumberWithVariant
@@ -927,9 +928,9 @@ class StrmScrapeRepository(
          * 数据源：当前影片演员列表、资料源头像、DMM2 GraphQL 和 gfriends Filetree.json。
          * 操作：
          * 1) 已存在本地头像的演员不重复下载。
-         * 2) 先按当前演员名查询 DMM/FANZA 官方头像。
-         * 3) 未命中时查询 JavDB、JavLibrary 对应影片演员名，再按别名回查 DMM/FANZA。
-         * 4) 最后尝试当前资料源头像和 gfriends 兜底。
+         * 2) 先按当前演员名及别名查询 DMM/FANZA 官方头像。
+         * 3) 未命中时按 JavDB、JavBus 的候选头像依次下载。
+         * 4) 最后查询 Fusion 的 gfriends 头像库。
          */
         val actorNames = info.actors
             .map { it.trim() }
@@ -1032,11 +1033,20 @@ class StrmScrapeRepository(
                 .values
                 .flatten()
                 .flatMap(::actorNameParts)
-            return sourceInfo.actorImageUrls.entries
-                .filter { (name, url) ->
-                    url.isNotBlank() && identityNames.any { identity -> name.sameActorExactly(identity) }
+            val candidates = buildList {
+                sourceInfo.actorImageCandidates.forEach { (name, urls) ->
+                    if (identityNames.any { identity -> name.sameActorExactly(identity) }) {
+                        addAll(urls)
+                    }
                 }
-                .flatMap { (_, url) -> dmmFanzaActorImageCandidates(url) }
+                sourceInfo.actorImageUrls.forEach { (name, url) ->
+                    if (identityNames.any { identity -> name.sameActorExactly(identity) }) {
+                        add(url)
+                    }
+                }
+            }
+            return prioritizeActorImageUrls(candidates)
+                .flatMap(::dmmFanzaActorImageCandidates)
                 .distinct()
         }
 
@@ -1131,23 +1141,7 @@ class StrmScrapeRepository(
                 }
             }
 
-            /*
-             * ================================================================================
-             * 步骤8：优先使用当前详情页绑定的演员头像
-             * ================================================================================
-             * 目标：避免 DMM/FANZA 按姓名回查时把同片其它演员的头像绑定到当前演员。
-             * 数据源：本轮详情页按演员姓名返回的头像 URL。
-             * 操作：
-             * 1) 先使用已经和演员姓名绑定的图片地址。
-             * 2) 强制重匹配时覆盖旧缓存，修复历史错配头像。
-             */
-            if (!saved && allowSourceImages) {
-                actorImageCandidates(info, actorName).forEach { url ->
-                    if (!saved) tryDownload(url, info.source.ifBlank { "metadata" })
-                }
-            }
-
-            // 8.1 直接按当前演员名查询 DMM/FANZA 官方头像，作为详情页图片不可用时的回退。
+            // 8.1 先按当前演员名查询 DMM/FANZA 官方头像。
             if (allowDmmName) {
                 runCatching {
                     withTimeout(DMM_FANZA_AVATAR_TIMEOUT_MS) {
@@ -1171,7 +1165,7 @@ class StrmScrapeRepository(
                 }
             }
 
-            // 8.2 用 JavDB、JavLibrary 影片演员名补齐本地头像别名，缺头像时再回查 DMM/FANZA。
+            // 8.2 用 JavDB、JavLibrary 影片演员名补齐本地头像别名，再用别名回查 DMM/FANZA。
             if (allowJavdbAliases || allowJavlibraryAliases) {
                 val aliases = loadActorAliases()
                 if (aliases.isNotEmpty()) {
@@ -1205,7 +1199,23 @@ class StrmScrapeRepository(
                     }
             }
 
-            // 8.3 所有网络资料源都不可用时，最后查询 Fusion 的 gfriends 头像库。
+            /*
+             * ================================================================================
+             * 步骤8.3：按资料源候选补齐头像
+             * ================================================================================
+             * 目标：官方头像不可用时，保留 JavDB、JavBus 的已绑定图片作为后备。
+             * 数据源：多源融合后的 actorImageCandidates。
+             * 操作：
+             * 1) 候选已按 DMM/FANZA、JavDB、JavBus 顺序排列。
+             * 2) 仅当前两轮官方回查未命中时下载第一个可用候选。
+             */
+            if (!saved && allowSourceImages) {
+                actorImageCandidates(info, actorName).forEach { url ->
+                    if (!saved) tryDownload(url, "metadata")
+                }
+            }
+
+            // 8.4 所有网络资料源都不可用时，最后查询 Fusion 的 gfriends 头像库。
             if (!saved && allowGfriends) {
                 val gfriendsUrl = runCatching { gfriendsActorAvatarRepository.findAvatar(actorName) }
                     .onFailure { error ->

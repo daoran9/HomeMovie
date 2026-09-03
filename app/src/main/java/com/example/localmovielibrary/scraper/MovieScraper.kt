@@ -120,20 +120,27 @@ class MovieScraperRegistry(
         val mergedActors = mergeActors(infos)
         val actors = mergedActors.names
         val actorAliases = mergedActors.aliases
-        val actorImages = actors.associateWith { actor ->
+        fun actorImageEntries(info: ScrapedMovieInfo): Sequence<Pair<String, String>> = sequence {
+            info.actorImageCandidates.forEach { (name, urls) ->
+                urls.forEach { url -> yield(name to url) }
+            }
+            info.actorImageUrls.forEach { (name, url) -> yield(name to url) }
+        }
+        val actorImageCandidates = actors.mapNotNull { actor ->
             val knownNames = actorNameParts(actor) + actorAliases[actor].orEmpty()
-            infos.asSequence()
-                .flatMap { it.actorImageUrls.entries.asSequence() }
+            val candidates = infos.asSequence()
+                .flatMap(::actorImageEntries)
                 .filter { (name, url) ->
                     isUsableActorImageUrl(url) && knownNames.any { knownName ->
                         actorNamesHaveExactVariant(name, knownName)
                     }
                 }
-                .sortedByDescending { (_, url) -> isOfficialDmmActorImageUrl(url) }
-                .firstOrNull()
-                ?.value
-                .orEmpty()
-        }.filterValues { it.isNotBlank() }
+                .map { (_, url) -> url }
+                .toList()
+                .let(::prioritizeActorImageUrls)
+            candidates.takeIf { it.isNotEmpty() }?.let { actor to it }
+        }.toMap()
+        val actorImages = actorImageCandidates.mapValues { (_, candidates) -> candidates.first() }
 
         return primary.copy(
             number = firstNonBlank { it.number },
@@ -154,6 +161,7 @@ class MovieScraperRegistry(
                 .filter { it.isNotBlank() }
                 .distinctBy { actorNameVariants(it).sorted().joinToString("|") },
             actorImageUrls = actorImages,
+            actorImageCandidates = actorImageCandidates,
             genres = firstList { it.genres },
             tags = firstList { it.tags },
             rating = firstNonBlank { it.rating },
@@ -566,6 +574,23 @@ internal fun isOfficialDmmActorImageUrl(url: String): Boolean {
         "/actjpgs/" in normalized
 }
 
+internal fun prioritizeActorImageUrls(urls: Collection<String>): List<String> = urls.asSequence()
+    .map(String::trim)
+    .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+    .distinct()
+    .sortedBy(::actorImageUrlPriority)
+    .toList()
+
+private fun actorImageUrlPriority(url: String): Int {
+    val normalized = url.lowercase(Locale.ROOT)
+    return when {
+        isOfficialDmmActorImageUrl(url) -> 0
+        "jdbstatic.com" in normalized || "javdb" in normalized -> 1
+        "javbus" in normalized -> 2
+        else -> 3
+    }
+}
+
 internal fun actorIdentityImageKey(url: String): String =
     url.trim().substringBefore('?').substringBefore('#').lowercase(Locale.ROOT)
 
@@ -783,20 +808,27 @@ internal fun ScrapedMovieInfo.canonicalizeActorIdentities(): ScrapedMovieInfo {
             .takeIf { it.isNotEmpty() }
             ?.let { aliases -> record.name to aliases }
     }.toMap()
-    val canonicalImages = records.mapNotNull { record ->
-        actorImageUrls.entries
-            .firstOrNull { (storedActor, imageUrl) ->
-                imageUrl.isNotBlank() && record.knownNames.any { known ->
-                    actorNamesHaveExactVariant(storedActor, known)
+    val canonicalImageCandidates = records.mapNotNull { record ->
+        val candidates = buildList {
+            actorImageCandidates.forEach { (storedActor, imageUrls) ->
+                if (record.knownNames.any { known -> actorNamesHaveExactVariant(storedActor, known) }) {
+                    addAll(imageUrls)
                 }
             }
-            ?.value
-            ?.let { imageUrl -> record.name to imageUrl }
+            actorImageUrls.forEach { (storedActor, imageUrl) ->
+                if (record.knownNames.any { known -> actorNamesHaveExactVariant(storedActor, known) }) {
+                    add(imageUrl)
+                }
+            }
+        }.let(::prioritizeActorImageUrls)
+        candidates.takeIf { it.isNotEmpty() }?.let { imageUrls -> record.name to imageUrls }
     }.toMap()
+    val canonicalImages = canonicalImageCandidates.mapValues { (_, candidates) -> candidates.first() }
     return copy(
         actors = records.map { it.name },
         actorAliases = canonicalAliases,
-        actorImageUrls = canonicalImages
+        actorImageUrls = canonicalImages,
+        actorImageCandidates = canonicalImageCandidates
     )
 }
 
