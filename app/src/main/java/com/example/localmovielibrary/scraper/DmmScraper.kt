@@ -28,17 +28,43 @@ class DmmScraper(
         )
         for (url in urls) {
             val html = fetch(url)
-            val link = Regex("""<a[^>]+href=["']([^"']*/detail/=/cid=[^"']+)["']""", RegexOption.IGNORE_CASE)
-                .find(html)?.groupValues?.get(1)
+            val link = selectDetailUrl(html, number)
             if (!link.isNullOrBlank()) {
-                return when {
+                return link
+            }
+        }
+        error("DMM 没有搜索到详情页：$number")
+    }
+
+    /*
+     * ================================================================================
+     * 步骤1：从旧 DMM 搜索页选择同番号详情页
+     * ================================================================================
+     * 目标：多个搜索结果同时出现时，优先同厂牌同序号的 content id。
+     * 数据源：旧 DMM 搜索页中的 cid 详情链接。
+     * 操作：
+     * 1) 提取所有影片详情链接并转换为绝对地址。
+     * 2) 复用 DMM2 的完整番号评分，保留兼容回退。
+     */
+    internal fun selectDetailUrl(html: String, number: String): String? {
+        val keyword = normalizeDmmSearchKeyword(number)
+        val cidPattern = Regex("""(?:^|[?/=])cid=([^/?&"']+)""", RegexOption.IGNORE_CASE)
+        return Regex("""<a[^>]+href=["']([^"']*/detail/=/cid=[^"']+)["']""", RegexOption.IGNORE_CASE)
+            .findAll(html)
+            .mapNotNull { match ->
+                match.groupValues.getOrNull(1)?.takeIf { link -> link.isNotBlank() }
+            }
+            .map { link ->
+                when {
                     link.startsWith("//") -> "https:$link"
                     link.startsWith("/") -> "https://www.dmm.co.jp$link"
                     else -> link
                 }
             }
-        }
-        error("DMM 没有搜索到详情页：$number")
+            .maxByOrNull { detailUrl ->
+                val contentId = cidPattern.find(detailUrl)?.groupValues?.getOrNull(1).orEmpty()
+                dmmContentIdMatchScore(contentId, keyword)
+            }
     }
 
     private fun parseDetail(html: String, detailUrl: String, number: String): ScrapedMovieInfo {

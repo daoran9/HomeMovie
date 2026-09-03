@@ -1,6 +1,8 @@
 ﻿package com.example.localmovielibrary.ui.settings
 
 import android.net.Uri
+import android.provider.DocumentsContract
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -28,6 +30,7 @@ import androidx.compose.material.icons.rounded.Article
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Public
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Settings
@@ -104,14 +107,29 @@ private enum class SettingsPage {
 fun SettingsScreen(
     viewModel: SettingsViewModel,
     onOpenScrapeLogs: () -> Unit,
-    onOpenMissavWeb: () -> Unit
+    onOpenMissavWeb: () -> Unit,
+    onOpenJavdbWeb: () -> Unit,
+    onOpenJavlibraryWeb: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
+    val actorAvatarUpdateState by viewModel.actorAvatarUpdateState.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
-    val strmDirectoryPicker = rememberTreePicker { uri -> viewModel.saveStrmDirectory(uri) }
-    val libraryDirectoryPicker = rememberTreePicker { uri -> viewModel.scanLibrary(uri) }
+    val strmDirectoryPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.saveStrmDirectory(uri)
+        }
+    }
+    val libraryDirectoryPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            viewModel.scanLibrary(uri)
+        }
+    }
     var currentPage by rememberSaveable { mutableStateOf<SettingsPage?>(null) }
     var showStrmBaseUrlDialog by remember { mutableStateOf(false) }
     var showImageCacheDialog by remember { mutableStateOf(false) }
@@ -180,8 +198,12 @@ fun SettingsScreen(
 
                     SettingsPage.Directory -> DirectorySettingsPage(
                         uiState = uiState,
-                        onPickLibrary = { libraryDirectoryPicker.launch(null) },
-                        onPickStrmDirectory = { strmDirectoryPicker.launch(null) },
+                        onPickLibrary = {
+                            libraryDirectoryPicker.launch(pickerInitialUri(uiState.libraryRootUri))
+                        },
+                        onPickStrmDirectory = {
+                            strmDirectoryPicker.launch(pickerInitialUri(uiState.strmTreeUri))
+                        },
                         onNoMediaEnabledChange = viewModel::updateLibraryNoMediaEnabled,
                         onReorganize = viewModel::reorganizeExistingLibraries,
                         onRebuildIndex = viewModel::rebuildCloudStrmIndex
@@ -206,15 +228,20 @@ fun SettingsScreen(
 
                     SettingsPage.Scrape -> ScrapeSettingsPage(
                         uiState = uiState,
-                        imageCacheSizeText = imageCacheSizeText,
-                        onSourceSelected = viewModel::updateDefaultScrapeSource,
-                        onRetryCountChange = viewModel::updateImageDownloadRetryCount,
+                         actorAvatarUpdateState = actorAvatarUpdateState,
+                         imageCacheSizeText = imageCacheSizeText,
+                         onSourceSelected = viewModel::updateDefaultScrapeSource,
+                         onGfriendsActorAvatarEnabledChange = viewModel::updateGfriendsActorAvatarEnabled,
+                         onRetryCountChange = viewModel::updateImageDownloadRetryCount,
                         onConcurrencyLimitChange = viewModel::updateScrapeConcurrencyLimit,
                         onDmm2SkippedPrefixDraftChange = viewModel::updateNewDmm2SkippedPrefix,
                         onAddDmm2SkippedPrefix = viewModel::addDmm2SkippedPrefix,
                         onRemoveDmm2SkippedPrefix = viewModel::removeDmm2SkippedPrefix,
                         onRefreshCacheSize = ::refreshImageCacheSize,
                         onClearImageCache = { showImageCacheDialog = true },
+                        onUpdateMissingActorAvatars = viewModel::updateMissingActorAvatars,
+                        onOpenJavdbWeb = onOpenJavdbWeb,
+                        onOpenJavlibraryWeb = onOpenJavlibraryWeb,
                         onOpenLogs = onOpenScrapeLogs,
                         onClearLogs = viewModel::clearScrapeLog
                     )
@@ -639,6 +666,11 @@ private fun DirectorySettingsPage(
     onReorganize: () -> Unit,
     onRebuildIndex: () -> Unit
 ) {
+    Text(
+        text = "影片库保存整理后的影片、NFO 和海报；STRM 目录只保存115临时播放入口。建议选择两个不同的子文件夹。",
+        color = Color.White.copy(alpha = 0.56f),
+        style = MaterialTheme.typography.bodySmall
+    )
     SettingsSectionTitle("影片库目录")
     DirectorySummary(
         title = uiState.libraryRootDisplayName,
@@ -1004,8 +1036,10 @@ private fun ExcludedCloudVideosPanel(
 @Composable
 private fun ScrapeSettingsPage(
     uiState: SettingsUiState,
+    actorAvatarUpdateState: com.example.localmovielibrary.data.repository.ActorAvatarUpdateState,
     imageCacheSizeText: String,
     onSourceSelected: (ScrapeSource) -> Unit,
+    onGfriendsActorAvatarEnabledChange: (Boolean) -> Unit,
     onRetryCountChange: (String) -> Unit,
     onConcurrencyLimitChange: (String) -> Unit,
     onDmm2SkippedPrefixDraftChange: (String) -> Unit,
@@ -1013,6 +1047,9 @@ private fun ScrapeSettingsPage(
     onRemoveDmm2SkippedPrefix: (String) -> Unit,
     onRefreshCacheSize: () -> Unit,
     onClearImageCache: () -> Unit,
+    onUpdateMissingActorAvatars: () -> Unit,
+    onOpenJavdbWeb: () -> Unit,
+    onOpenJavlibraryWeb: () -> Unit,
     onOpenLogs: () -> Unit,
     onClearLogs: () -> Unit
 ) {
@@ -1020,6 +1057,28 @@ private fun ScrapeSettingsPage(
     DefaultScrapeSourceRow(
         selected = uiState.defaultScrapeSource,
         onSelected = onSourceSelected
+    )
+    Text(
+        text = "首选源无结果时自动尝试其它资料源（DMM2、JavDB、JavLibrary、JavBus、DMM、Official）；MissAV 不参与自动回退。",
+        color = Color.White.copy(alpha = 0.62f),
+        style = MaterialTheme.typography.bodySmall
+    )
+    GfriendsActorAvatarSwitch(
+        enabled = uiState.gfriendsActorAvatarEnabled,
+        onEnabledChange = onGfriendsActorAvatarEnabledChange
+    )
+    JavdbCookieStatusCard(
+        hasCookie = uiState.hasJavdbCookie,
+        onOpenJavdbWeb = onOpenJavdbWeb
+    )
+    JavlibraryCookieStatusCard(
+        hasCookie = uiState.hasJavlibraryCookie,
+        onOpenJavlibraryWeb = onOpenJavlibraryWeb
+    )
+    ActorAvatarUpdatePanel(
+        state = actorAvatarUpdateState,
+        gfriendsEnabled = uiState.gfriendsActorAvatarEnabled,
+        onUpdate = onUpdateMissingActorAvatars
     )
     SettingsSectionTitle("DMM2 跳过")
     Dmm2SkippedPrefixPanel(
@@ -1060,7 +1119,7 @@ private fun ScrapeSettingsPage(
     )
     SettingsSectionTitle("刮削日志")
     Text(
-        text = "未刮削 STRM 可以在影片详情页的“更多”中手动刮削；网盘添加影片时会使用默认刮削来源。",
+        text = "未刮削 STRM 可以在影片详情页的“更多”中手动刮削；网盘添加影片时会先用默认来源，失败后自动回退。",
         color = Color.White.copy(alpha = 0.62f),
         style = MaterialTheme.typography.bodySmall
     )
@@ -2360,14 +2419,6 @@ private fun settingsTextFieldColors() = OutlinedTextFieldDefaults.colors(
     unfocusedSupportingTextColor = Color.White.copy(alpha = 0.52f)
 )
 
-@Composable
-private fun rememberTreePicker(onPicked: (Uri) -> Unit) =
-    rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
-        if (uri != null) {
-            onPicked(uri)
-        }
-    }
-
 private fun formatCacheSize(bytes: Long): String {
     val kb = bytes / 1024.0
     val mb = kb / 1024.0
@@ -2380,11 +2431,221 @@ private fun formatCacheSize(bytes: Long): String {
     }
 }
 
+@Composable
+private fun JavdbCookieStatusCard(
+    hasCookie: Boolean,
+    onOpenJavdbWeb: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.075f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = if (hasCookie) Icons.Rounded.CheckCircle else Icons.Rounded.Public,
+                contentDescription = null,
+                tint = if (hasCookie) Color(0xFF7BD88F) else Color.White.copy(alpha = 0.72f)
+            )
+            Column(modifier = Modifier.padding(start = 10.dp)) {
+                Text(
+                    text = if (hasCookie) "已获取 JavDB Cookie" else "尚未获取 JavDB Cookie",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (hasCookie) {
+                        "后续 JavDB 刮削会自动携带 Cookie。"
+                    } else {
+                        "JavDB 被拦截时，先打开页面完成验证。"
+                    },
+                    color = Color.White.copy(alpha = 0.62f),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+        OutlinedButton(
+            onClick = onOpenJavdbWeb,
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Icon(Icons.Rounded.Public, contentDescription = null)
+            Text(
+                if (hasCookie) "刷新 JavDB Cookie" else "获取 JavDB Cookie",
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun JavlibraryCookieStatusCard(
+    hasCookie: Boolean,
+    onOpenJavlibraryWeb: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.075f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = if (hasCookie) Icons.Rounded.CheckCircle else Icons.Rounded.Public,
+                contentDescription = null,
+                tint = if (hasCookie) Color(0xFF7BD88F) else Color.White.copy(alpha = 0.72f)
+            )
+            Column(modifier = Modifier.padding(start = 10.dp)) {
+                Text(
+                    text = if (hasCookie) "已获取 JavLibrary Cookie" else "尚未获取 JavLibrary Cookie",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (hasCookie) {
+                        "后续 JavLibrary 刮削会自动携带 Cookie。"
+                    } else {
+                        "JavLibrary 有 Cloudflare 验证，先打开页面完成验证。"
+                    },
+                    color = Color.White.copy(alpha = 0.62f),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+        OutlinedButton(
+            onClick = onOpenJavlibraryWeb,
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Icon(Icons.Rounded.Public, contentDescription = null)
+            Text(
+                if (hasCookie) "刷新 JavLibrary Cookie" else "获取 JavLibrary Cookie",
+                modifier = Modifier.padding(start = 8.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun ActorAvatarUpdatePanel(
+    state: com.example.localmovielibrary.data.repository.ActorAvatarUpdateState,
+    gfriendsEnabled: Boolean,
+    onUpdate: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.075f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = "演员头像",
+            color = Color.White,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = state.message ?: "全库重新匹配演员头像，不修改影片信息",
+            color = Color.White.copy(alpha = 0.62f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            text = if (gfriendsEnabled) {
+                "当前会在 DMM/FANZA、JavDB、JavLibrary、JavBus、旧 DMM 和厂商官网都未命中时使用 gfriends。"
+            } else {
+                "当前不会使用 gfriends，只查询 DMM/FANZA、JavDB、JavLibrary、JavBus、旧 DMM 和厂商官网。"
+            },
+            color = Color.White.copy(alpha = 0.62f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        if (state.isUpdating) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
+        Button(
+            onClick = onUpdate,
+            enabled = !state.isUpdating,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            if (state.isUpdating) {
+                CircularProgressIndicator(
+                    modifier = Modifier.padding(end = 8.dp).heightIn(max = 18.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White
+                )
+            } else {
+                Icon(Icons.Rounded.Image, contentDescription = null)
+            }
+            Text("全库重匹配演员头像", modifier = Modifier.padding(start = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun GfriendsActorAvatarSwitch(
+    enabled: Boolean,
+    onEnabledChange: (Boolean) -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.075f), RoundedCornerShape(16.dp))
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = "gfriends 头像兜底",
+                color = Color.White,
+                style = MaterialTheme.typography.titleSmall,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = "仅在其它来源都没有演员头像时使用，默认关闭。",
+                color = Color.White.copy(alpha = 0.56f),
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+        Switch(
+            checked = enabled,
+            onCheckedChange = onEnabledChange
+        )
+    }
+}
+
+/*
+ * ============================================================================================================
+ * 步骤1：准备目录选择器初始位置
+ * ============================================================================================================
+ * 目标：让 DocumentsUI 打开对应目录，不沿用另一个按钮的最近位置。
+ * 数据源：设置中保存的 SAF tree URI。
+ * 操作：
+ * 1) 解析 tree document ID。
+ * 2) 转成 DocumentsUI 更稳定识别的 document URI。
+ */
+private fun pickerInitialUri(treeUriString: String?): Uri? {
+    Log.i("SettingsScreen", "准备目录选择器初始位置")
+    if (treeUriString.isNullOrBlank()) {
+        Log.i("SettingsScreen", "没有已保存目录，使用系统默认位置")
+        return null
+    }
+    val treeUri = Uri.parse(treeUriString)
+    val documentId = runCatching { DocumentsContract.getTreeDocumentId(treeUri) }.getOrNull()
+    return documentId
+        ?.let { id -> treeUri.authority?.let { authority -> DocumentsContract.buildDocumentUri(authority, id) } }
+        ?.also { Log.i("SettingsScreen", "目录选择器初始位置已准备") }
+}
+
 private val ScrapeSource.label: String
     get() = when (this) {
         ScrapeSource.Dmm -> "DMM"
         ScrapeSource.Dmm2 -> "DMM2"
         ScrapeSource.Official -> "Official"
         ScrapeSource.Javbus -> "JavBus"
+        ScrapeSource.Javdb -> "JavDB"
+        ScrapeSource.Javlibrary -> "JavLibrary"
         ScrapeSource.Missav -> "MissAV"
     }

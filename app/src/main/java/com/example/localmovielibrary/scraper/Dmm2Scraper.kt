@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -22,6 +23,65 @@ class Dmm2Scraper(
 ) : MovieScraper {
     override val source: ScrapeSource = ScrapeSource.Dmm2
 
+    /** DMM/FANZA 演员资料，供头像补齐流程按姓名回查官方头像。 */
+    suspend fun findActorImageByName(actorName: String): DmmActorImage? = withContext(ioDispatcher) {
+        val query = actorName.trim()
+        if (query.isBlank()) return@withContext null
+
+        /*
+         * ================================================================================
+         * 步骤1：按演员姓名定位 DMM/FANZA 演员 ID
+         * ================================================================================
+         * 目标：不扫描 1.5 万条演员总表，直接复用番号搜索接口的演员索引。
+         * 数据源：DMM/FANZA legacySearchPPV，queryWord 为当前演员名。
+         * 操作：
+         * 1) 搜索演员姓名关联的影片。
+         * 2) 从影片演员列表中保留姓名完全匹配的演员 ID。
+         */
+        logger?.invoke("DMM/FANZA 演员名回查：$query")
+        val searchJson = fetchSearch(query)
+        val contents = searchJson
+            .optJSONObject("data")
+            ?.optJSONObject("legacySearchPPV")
+            ?.optJSONObject("result")
+            ?.optJSONArray("contents")
+            ?: JSONArray()
+        val ids = (0 until contents.length())
+            .flatMap { index ->
+                val actresses = contents.optJSONObject(index)?.optJSONArray("actresses") ?: return@flatMap emptyList()
+                (0 until actresses.length()).mapNotNull { actressIndex ->
+                    val actress = actresses.optJSONObject(actressIndex) ?: return@mapNotNull null
+                    val id = actress.optString("id").trim()
+                    val name = actress.optString("name").cleanText()
+                    if (id.isNotBlank() && actorNamesHaveExactVariant(name, query)) id else null
+                }
+            }
+            .distinct()
+        if (ids.isEmpty()) {
+            logger?.invoke("DMM/FANZA 演员名未命中：$query")
+            return@withContext null
+        }
+
+        /*
+         * ================================================================================
+         * 步骤2：读取官方头像地址
+         * ================================================================================
+         * 目标：只返回 DMM/FANZA 的真实头像，不把 null 或占位地址交给下载层。
+         * 数据源：DMM/FANZA actressesByIds GraphQL。
+         * 操作：
+         * 1) 批量查询候选演员 ID。
+         * 2) 按姓名匹配并过滤空头像。
+         */
+        val details = fetchActressesByIds(ids)
+        val result = details.firstOrNull { actress ->
+            actorNamesHaveExactVariant(actress.name, query) && actress.imageUrl.isUsableDmmActorImage()
+        }?.let { actress ->
+            DmmActorImage(name = actress.name, imageUrl = actress.imageUrl)
+        }
+        logger?.invoke("DMM/FANZA 演员名回查完成：$query，命中=${result != null}")
+        result
+    }
+
     override suspend fun scrape(number: String): ScrapedMovieInfo = withContext(ioDispatcher) {
         val normalized = normalizeNumber(number)
         val keyword = normalizeNumberForSearch(normalized)
@@ -38,7 +98,14 @@ class Dmm2Scraper(
 
         val selected = selectBestSearchResult(contents, keyword)
         val contentId = selected.optString("id").trim()
-        logger?.invoke("DMM2 选中结果：keyword=$keyword, contentId=$contentId, title=${selected.optString("title").cleanText()}")
+        val matchScore = scoreSearchItem(selected, keyword)
+        logger?.invoke(
+            "DMM2 选中结果：keyword=$keyword, contentId=$contentId, " +
+                "matchScore=$matchScore, title=${selected.optString("title").cleanText()}"
+        )
+        if (matchScore < EXACT_CATALOG_MATCH_SCORE) {
+            error("DMM2 没有找到与番号完全一致的详情：$normalized")
+        }
         if (contentId.isBlank()) error("DMM2 搜索结果没有 content id")
 
         val detailJson = fetchDetail(contentId)
@@ -61,7 +128,12 @@ class Dmm2Scraper(
             .put("operationName", "AvSearch")
             .put("query", SEARCH_QUERY)
             .put("variables", variables)
-        return postGraphql(payload, "https://video.dmm.co.jp/av/list/?key=$keyword")
+        val referer = "https://video.dmm.co.jp/av/list/".toHttpUrl()
+            .newBuilder()
+            .addQueryParameter("key", keyword)
+            .build()
+            .toString()
+        return postGraphql(payload, referer)
     }
 
     private suspend fun fetchDetail(contentId: String): JSONObject {
@@ -121,15 +193,10 @@ class Dmm2Scraper(
     private fun scoreSearchItem(item: JSONObject, keyword: String): Int {
         val contentId = item.optString("id").lowercase(Locale.ROOT)
         val title = item.optString("title").lowercase(Locale.ROOT)
-        var score = 0
-        if (contentId == keyword) score += 200
-        if (keyword in contentId) score += 150
+        var score = dmmContentIdMatchScore(contentId, keyword)
         val relaxed = keyword.replace(Regex("""0+(\d+)$"""), "$1")
         if (relaxed.isNotBlank() && relaxed in contentId) score += 30
         if (keyword in title) score += 20
-        listOf("tp", "tapestry", "tokuten", "goods", "set", "limited").forEach { bad ->
-            if (bad in contentId) score -= 30
-        }
         return score
     }
 
@@ -209,11 +276,36 @@ class Dmm2Scraper(
             .mapNotNull { index ->
                 val actor = optJSONObject(index) ?: return@mapNotNull null
                 val name = actor.optString("name").cleanText()
-                val imageUrl = actor.optString("imageUrl").cleanText()
+                val imageUrl = actor.optString("imageUrl", "")
+                    .cleanText()
+                    .takeUnless { it.equals("null", ignoreCase = true) }
+                    .orEmpty()
                 if (name.isBlank() || imageUrl.isBlank()) null else name to imageUrl
             }
             .distinctBy { it.first }
             .toMap()
+    }
+
+    private suspend fun fetchActressesByIds(ids: List<String>): List<DmmActorRecord> {
+        val payload = JSONObject()
+            .put("operationName", "ActressByIds")
+            .put("query", ACTRESS_BY_IDS_QUERY)
+            .put("variables", JSONObject().put("ids", JSONArray(ids)))
+        val response = postGraphql(payload, "https://video.dmm.co.jp/av/")
+        val actresses = response
+            .optJSONObject("data")
+            ?.optJSONArray("actressesByIds")
+            ?: JSONArray()
+        return (0 until actresses.length()).mapNotNull { index ->
+            val actress = actresses.optJSONObject(index) ?: return@mapNotNull null
+            DmmActorRecord(
+                id = actress.optString("id").trim(),
+                name = actress.optString("name").cleanText(),
+                imageUrl = actress.optString("imageUrl", "").cleanText()
+                    .takeUnless { it.equals("null", ignoreCase = true) }
+                    .orEmpty()
+            )
+        }
     }
 
     private fun normalizeNumber(number: String): String {
@@ -223,9 +315,7 @@ class Dmm2Scraper(
     }
 
     private fun normalizeNumberForSearch(number: String): String {
-        val match = Regex("""(?i)^([a-z]+)-?(\d+)$""").find(number.trim().replace("_", "-"))
-            ?: return number.lowercase(Locale.ROOT).replace("-", "")
-        return match.groupValues[1].lowercase(Locale.ROOT) + match.groupValues[2].toInt().toString().padStart(5, '0')
+        return normalizeDmmSearchKeyword(number)
     }
 
     private fun buildPosterUrl(thumbUrl: String): String =
@@ -262,12 +352,28 @@ class Dmm2Scraper(
             .replace("\t", "")
             .trim()
 
+    private fun String.isUsableDmmActorImage(): Boolean =
+        isNotBlank() && !contains("now-printing", ignoreCase = true) &&
+            !contains("no-image", ignoreCase = true) &&
+            !contains("placeholder", ignoreCase = true)
+
     private companion object {
         const val GRAPHQL_URL = "https://api.video.dmm.co.jp/graphql"
         val JSON_MEDIA_TYPE = "application/json".toMediaType()
         const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         const val GRAPHQL_RETRY_COUNT = 3
         const val SEARCH_LOG_LIMIT = 10
+        const val EXACT_CATALOG_MATCH_SCORE = 900
+
+        const val ACTRESS_BY_IDS_QUERY = """
+query ActressByIds(${'$'}ids: [ID!]!) {
+  actressesByIds(ids: ${'$'}ids) {
+    id
+    name
+    imageUrl
+  }
+}
+"""
 
         const val SEARCH_QUERY = """
 query AvSearch(${'$'}limit: Int!, ${'$'}offset: Int, ${'$'}floor: PPVFloor, ${'$'}sort: ContentSearchPPVSort!, ${'$'}queryWord: String, ${'$'}filter: ContentSearchPPVFilterInput, ${'$'}facetLimit: Int!, ${'$'}excludeUndelivered: Boolean!) {
@@ -291,6 +397,7 @@ query AvSearch(${'$'}limit: Int!, ${'$'}offset: Int, ${'$'}floor: PPVFloor, ${'$
     }
   }
 }
+
 """
 
         const val DETAIL_QUERY = """
@@ -321,4 +428,96 @@ query Test(${'$'}id: ID!) {
 }
 """
     }
+}
+
+data class DmmActorImage(
+    val name: String,
+    val imageUrl: String
+)
+
+private data class DmmActorRecord(
+    val id: String,
+    val name: String,
+    val imageUrl: String
+)
+
+/*
+ * ================================================================================
+ * 步骤1：标准化 DMM/FANZA 内容检索码
+ * ================================================================================
+ * 目标：把用户输入的厂牌番号转换成 DMM 内容 ID 中使用的五位数字编号。
+ * 数据源：影片文件名或媒体库记录中的标准番号。
+ * 操作：
+ * 1) 保留厂牌前缀并统一为小写。
+ * 2) 把数字部分补齐为五位，供 DMM2 和旧 DMM 搜索共用。
+ */
+internal fun normalizeDmmSearchKeyword(number: String): String {
+    val input = number.trim().replace("_", "-")
+    val match = Regex("""(?i)^([a-z]+)-?(\d+)$""").find(input)
+        ?: return input.lowercase(Locale.ROOT).replace("-", "")
+    return match.groupValues[1].lowercase(Locale.ROOT) + match.groupValues[2].toInt().toString().padStart(5, '0')
+}
+
+/*
+ * ================================================================================
+ * 步骤2：按完整番号给 DMM 内容 ID 排序
+ * ================================================================================
+ * 目标：优先选择相同厂牌和相同序号，避免 NAMH-022 命中 HNAMH-022。
+ * 数据源：DMM/FANZA 搜索接口返回的 content id。
+ * 操作：
+ * 1) 识别内容 ID 中有非字母边界的完整番号。
+ * 2) 没有完整匹配时保留旧的后缀和子串回退，兼容历史厂牌别名。
+ */
+internal fun dmmContentIdMatchScore(contentId: String, keyword: String): Int {
+    val normalizedContentId = contentId.trim().lowercase(Locale.ROOT)
+    val normalizedKeyword = keyword.trim().lowercase(Locale.ROOT)
+    if (normalizedContentId.isBlank() || normalizedKeyword.isBlank()) return 0
+
+    val exactCatalogCode = Regex(
+        """(?:^|[^a-z])${Regex.escape(normalizedKeyword)}(?:$|[^a-z])""",
+        RegexOption.IGNORE_CASE
+    )
+    var score = when {
+        normalizedContentId == normalizedKeyword -> 1_000
+        exactCatalogCode.containsMatchIn(normalizedContentId) -> 900
+        normalizedContentId.endsWith(normalizedKeyword) -> 200
+        normalizedKeyword in normalizedContentId -> 150
+        else -> 0
+    }
+    listOf("tp", "tapestry", "tokuten", "goods", "set", "limited").forEach { bad ->
+        if (bad in normalizedContentId) score -= 30
+    }
+    return score
+}
+
+/*
+ * ================================================================================
+ * 步骤1：准备 DMM/FANZA 演员头像候选地址
+ * ================================================================================
+ * 目标：同一张官方头像同时覆盖 DMM 旧 CDN 和 FANZA 新 CDN。
+ * 数据源：DMM2 GraphQL 返回的 imageUrl。
+ * 操作：
+ * 1) 保留 GraphQL 原始地址作为首选。
+ * 2) 在两个已知官方 CDN 之间生成一个备用地址。
+ * 3) 去重并忽略空地址，交给下载层做内容校验。
+ */
+internal fun dmmFanzaActorImageCandidates(url: String): List<String> {
+    val original = url.trim()
+    if (original.isBlank()) return emptyList()
+    val alternate = when {
+        original.contains("https://awsimgsrc.dmm.co.jp/pics_dig/mono/actjpgs/", ignoreCase = true) ->
+            original.replace(
+                "https://awsimgsrc.dmm.co.jp/pics_dig/mono/actjpgs/",
+                "https://pics.dmm.co.jp/mono/actjpgs/",
+                ignoreCase = true
+            )
+        original.contains("https://pics.dmm.co.jp/mono/actjpgs/", ignoreCase = true) ->
+            original.replace(
+                "https://pics.dmm.co.jp/mono/actjpgs/",
+                "https://awsimgsrc.dmm.co.jp/pics_dig/mono/actjpgs/",
+                ignoreCase = true
+            )
+        else -> null
+    }
+    return listOfNotNull(original, alternate).distinct()
 }

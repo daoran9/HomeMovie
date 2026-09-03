@@ -37,6 +37,18 @@ class AppSettingsRepository(context: Context) {
         prefs.edit().putString(KEY_MISSAV_COOKIES, value.trim()).commit()
     }
 
+    fun getJavdbCookies(): String = prefs.getString(KEY_JAVDB_COOKIES, null).orEmpty()
+
+    fun saveJavdbCookies(value: String) {
+        prefs.edit().putString(KEY_JAVDB_COOKIES, value.trim()).commit()
+    }
+
+    fun getJavlibraryCookies(): String = prefs.getString(KEY_JAVLIBRARY_COOKIES, null).orEmpty()
+
+    fun saveJavlibraryCookies(value: String) {
+        prefs.edit().putString(KEY_JAVLIBRARY_COOKIES, value.trim()).commit()
+    }
+
     fun getJavzimuCookies(): String = prefs.getString(KEY_JAVZIMU_COOKIES, null).orEmpty()
 
     fun saveJavzimuCookies(value: String) {
@@ -120,6 +132,13 @@ class AppSettingsRepository(context: Context) {
 
     fun saveDefaultScrapeSource(source: ScrapeSource) {
         prefs.edit().putString(KEY_DEFAULT_SCRAPE_SOURCE, source.name).apply()
+    }
+
+    fun isGfriendsActorAvatarEnabled(): Boolean =
+        prefs.getBoolean(KEY_GFRIENDS_ACTOR_AVATAR_ENABLED, false)
+
+    fun saveGfriendsActorAvatarEnabled(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_GFRIENDS_ACTOR_AVATAR_ENABLED, enabled).apply()
     }
 
     fun getImageDownloadRetryCount(): Int {
@@ -507,11 +526,14 @@ class AppSettingsRepository(context: Context) {
         const val KEY_LIBRARY_ROOT_URI = "library_root_uri"
         const val KEY_LIBRARY_ROOT_URI_HISTORY = "library_root_uri_history"
         const val KEY_MISSAV_COOKIES = "missav_cookies"
+        const val KEY_JAVDB_COOKIES = "javdb_cookies"
+        const val KEY_JAVLIBRARY_COOKIES = "javlibrary_cookies"
         const val KEY_JAVZIMU_COOKIES = "javzimu_cookies"
         const val KEY_AVSUBTITLES_COOKIES = "avsubtitles_cookies"
         const val KEY_SUBTITLE_SEARCH_PROVIDER = "subtitle_search_provider"
         const val KEY_CLOUD115_LOGIN_APP = "cloud115_login_app"
         const val KEY_DEFAULT_SCRAPE_SOURCE = "default_scrape_source"
+        const val KEY_GFRIENDS_ACTOR_AVATAR_ENABLED = "gfriends_actor_avatar_enabled"
         const val KEY_IMAGE_DOWNLOAD_RETRY_COUNT = "image_download_retry_count"
         const val KEY_SCRAPE_CONCURRENCY_LIMIT = "scrape_concurrency_limit"
         const val KEY_DMM2_SKIPPED_NUMBER_PREFIXES = "dmm2_skipped_number_prefixes"

@@ -1,6 +1,7 @@
 ﻿package com.example.localmovielibrary.cloud115
 
 import android.content.Context
+import android.util.Log
 import com.example.localmovielibrary.data.repository.AppSettingsRepository
 import com.example.localmovielibrary.playback.USER_AGENT
 import kotlinx.coroutines.Dispatchers
@@ -23,7 +24,7 @@ object Cloud115LoginApps {
         Cloud115LoginApp("web", "\u0031\u0031\u0035\u751f\u6d3b_\u7f51\u9875\u7aef"),
         Cloud115LoginApp("ios", "\u0031\u0031\u0035\u751f\u6d3b_\u82f9\u679c\u7aef"),
         Cloud115LoginApp("115ios", "\u0031\u0031\u0035_\u82f9\u679c\u7aef"),
-        Cloud115LoginApp("bandroid", "\u672a\u77e5: android"),
+        Cloud115LoginApp("android", "115\u751f\u6d3b_\u5b89\u5353\u7aef"),
         Cloud115LoginApp("115ipad", "\u0031\u0031\u0035_\u82f9\u679c\u5e73\u677f\u7aef"),
         Cloud115LoginApp("tv", "\u0031\u0031\u0035\u751f\u6d3b_\u5b89\u5353\u7535\u89c6\u7aef"),
         Cloud115LoginApp("apple_tv", "\u0031\u0031\u0035\u751f\u6d3b_\u82f9\u679c\u7535\u89c6\u7aef"),
@@ -38,7 +39,7 @@ object Cloud115LoginApps {
     val default: Cloud115LoginApp = all.first { it.app == "ios" }
 
     fun find(app: String?): Cloud115LoginApp =
-        all.firstOrNull { it.app == app } ?: default
+        all.firstOrNull { it.app == if (app == "bandroid") "android" else app } ?: default
 }
 
 data class Cloud115QrToken(
@@ -76,7 +77,7 @@ class Cloud115QrLoginClient(
     private val settingsRepository: AppSettingsRepository,
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
         .connectTimeout(15, TimeUnit.SECONDS)
-        .readTimeout(30, TimeUnit.SECONDS)
+        .readTimeout(40, TimeUnit.SECONDS)
         .writeTimeout(15, TimeUnit.SECONDS)
         .build()
 ) {
@@ -127,9 +128,20 @@ class Cloud115QrLoginClient(
         deleted
     }
 
-    suspend fun requestToken(): Cloud115QrToken = withContext(Dispatchers.IO) {
+    /*
+     * ================================================================================
+     * 步骤1：按登录端申请二维码
+     * ================================================================================
+     * 目标：二维码确认页和最终 Cookie 登录端保持一致。
+     * 数据源：设置页选择的 115 客户端类型。
+     * 操作：
+     * 1) 使用所选客户端对应的 token 接口。
+     * 2) 使用 115 官方通用二维码图片接口，避免固定生成 Mac 端二维码。
+     */
+    suspend fun requestToken(loginApp: Cloud115LoginApp = Cloud115LoginApps.default): Cloud115QrToken = withContext(Dispatchers.IO) {
+        Log.i(TAG, "开始申请115二维码，client=${loginApp.app}")
         val request = Request.Builder()
-            .url(TOKEN_URL)
+            .url("$TOKEN_BASE_URL/${loginApp.app}/1.0/token/")
             .get()
             .header("User-Agent", USER_AGENT)
             .header("Accept", "application/json, text/plain, */*")
@@ -142,7 +154,8 @@ class Cloud115QrLoginClient(
             val uid = data.optString("uid").takeIf { it.isNotBlank() } ?: error("115 二维码响应缺少 uid")
             val time = data.optString("time").takeIf { it.isNotBlank() } ?: error("115 二维码响应缺少 time")
             val sign = data.optString("sign").takeIf { it.isNotBlank() } ?: error("115 二维码响应缺少 sign")
-            val qrImageUrl = "$QR_IMAGE_URL?uid=$uid"
+            val qrImageUrl = "$QR_IMAGE_URL?qrfrom=1&client=0d&uid=$uid"
+            Log.i(TAG, "115二维码申请完成，client=${loginApp.app}")
             Cloud115QrToken(uid = uid, time = time, sign = sign, qrImageUrl = qrImageUrl)
         }
     }
@@ -156,6 +169,7 @@ class Cloud115QrLoginClient(
         withContext(Dispatchers.IO) {
             val body = FormBody.Builder()
                 .add("account", token.uid)
+                .add("app", loginApp.app)
                 .build()
             val request = Request.Builder()
                 .url("https://passportapi.115.com/app/1.0/${loginApp.app}/1.0/login/qrcode/")
@@ -206,17 +220,23 @@ class Cloud115QrLoginClient(
             if (!response.isSuccessful) error("115 二维码状态获取失败：HTTP ${response.code}")
             val raw = response.body?.string().orEmpty()
             val json = JSONObject(raw)
+            if (json.optInt("code", 0) == QR_WAITING_CODE) {
+                return Cloud115QrLoginStatus.Waiting
+            }
             val data = json.optJSONObject("data") ?: json
             val numericStatus = data.optInt("status", Int.MIN_VALUE)
             val statusText = data.optString("status").lowercase()
             if (numericStatus == Int.MIN_VALUE && statusText.isBlank()) {
+                if (json.optInt("code", 0) == QR_EXPIRED_CODE) {
+                    return Cloud115QrLoginStatus.Expired
+                }
                 error("115 二维码状态响应缺少 status")
             }
             return when (numericStatus) {
                 0 -> Cloud115QrLoginStatus.Waiting
                 1 -> Cloud115QrLoginStatus.Scanned
                 2 -> Cloud115QrLoginStatus.Confirmed
-                -1 -> Cloud115QrLoginStatus.Expired
+                9, -1 -> Cloud115QrLoginStatus.Expired
                 -2 -> Cloud115QrLoginStatus.Canceled
                 else -> {
                     when {
@@ -301,10 +321,13 @@ class Cloud115QrLoginClient(
     }
 
     private companion object {
-        const val TOKEN_URL = "https://qrcodeapi.115.com/api/1.0/web/1.0/token/"
+        const val TAG = "Cloud115QrLoginClient"
+        const val TOKEN_BASE_URL = "https://qrcodeapi.115.com/api/1.0"
         const val STATUS_URL_PRIMARY = "https://qrcodeapi.115.com/get/status/"
         const val STATUS_URL_FALLBACK = "https://qrcodeapi.115.com/api/1.0/web/1.0/status/"
-        const val QR_IMAGE_URL = "https://qrcodeapi.115.com/api/1.0/mac/1.0/qrcode"
+        const val QR_IMAGE_URL = "https://qrcodeapi.115.com/api/1.0/web/1.0/qrcode"
+        const val QR_WAITING_CODE = 90038
+        const val QR_EXPIRED_CODE = 40199002
         const val COOKIE_DIR = "115cookies"
         const val COOKIE_FILE_PREFIX = "115cookie_"
         const val COOKIE_FILE_SUFFIX = ".txt"

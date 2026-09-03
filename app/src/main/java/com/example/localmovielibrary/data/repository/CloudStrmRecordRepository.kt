@@ -29,6 +29,24 @@ class CloudStrmRecordRepository(
         dao.get(pickcode)
     }
 
+    /*
+     * ================================================================================
+     * 步骤1：判断网盘影片是否已经完成影片库入库
+     * ================================================================================
+     * 目标：区分“只生成了临时 STRM”和“已经整理到影片库”的记录。
+     * 数据源：Cloud STRM 索引、关联影片记录和影片库目录 URI。
+     * 操作：
+     * 1) 校验记录当前指向的影片库根目录。
+     * 2) 校验关联影片仍然存在且属于该影片库。
+     * 3) 失败批次留下的临时 STRM 记录返回 false，允许后续重试。
+     */
+    suspend fun isFinalizedInLibrary(pickcode: String, libraryRootUri: String): Boolean = withContext(Dispatchers.IO) {
+        val record = dao.get(pickcode) ?: return@withContext false
+        if (record.libraryRootUri != libraryRootUri || record.movieId == null) return@withContext false
+        val movie = movieDao.getMovieLite(record.movieId) ?: return@withContext false
+        movie.libraryRootUri == libraryRootUri && canOpenUri(record.strmUri)
+    }
+
 
     suspend fun existingPickcodesForVisibleItems(pickcodes: Set<String>): Set<String> = withContext(Dispatchers.IO) {
         if (pickcodes.isEmpty()) return@withContext emptySet()
@@ -136,7 +154,15 @@ class CloudStrmRecordRepository(
         val info = extractMovieNumberInfo(fileName) ?: return@withContext null
         if (info.partLabel != null) return@withContext null
         if (detectMovieVariant(fileName) != MovieVariant.Standard) return@withContext null
+        val libraryRootUri = settingsRepository.getLibraryRootUri() ?: return@withContext null
         dao.getStandardSameNumberCandidate(info.number, newPickcode)
+            ?.takeIf { record -> isFinalizedInLibrary(record, libraryRootUri) }
+    }
+
+    private suspend fun isFinalizedInLibrary(record: CloudStrmRecordEntity, libraryRootUri: String): Boolean {
+        if (record.libraryRootUri != libraryRootUri || record.movieId == null) return false
+        val movie = movieDao.getMovieLite(record.movieId) ?: return false
+        return movie.libraryRootUri == libraryRootUri && canOpenUri(record.strmUri)
     }
 
     suspend fun replacePickcode(

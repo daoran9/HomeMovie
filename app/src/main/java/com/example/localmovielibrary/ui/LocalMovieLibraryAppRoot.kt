@@ -23,6 +23,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -35,6 +36,8 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import com.example.localmovielibrary.data.AppContainer
+import com.example.localmovielibrary.playback.PlaybackQueueItem
+import com.example.localmovielibrary.playback.PlaybackQueueStore
 import com.example.localmovielibrary.ui.cloud.CloudBrowserScreen
 import com.example.localmovielibrary.ui.cloud.CloudBrowserViewModel
 import com.example.localmovielibrary.ui.detail.DetailScreen
@@ -54,9 +57,12 @@ import com.example.localmovielibrary.ui.player.PlayerViewModel
 import com.example.localmovielibrary.ui.search.SearchScreen
 import com.example.localmovielibrary.ui.search.SearchViewModel
 import com.example.localmovielibrary.ui.settings.JavzimuCookieWebViewScreen
+import com.example.localmovielibrary.ui.settings.JavdbCookieWebViewScreen
+import com.example.localmovielibrary.ui.settings.JavlibraryCookieWebViewScreen
 import com.example.localmovielibrary.ui.settings.SettingsScreen
 import com.example.localmovielibrary.ui.settings.SettingsViewModel
 import com.example.localmovielibrary.ui.settings.MissavCookieWebViewScreen
+import com.example.localmovielibrary.ui.shared.ScraperWebViewHost
 
 @Composable
 fun LocalMovieLibraryAppRoot(appContainer: AppContainer) {
@@ -165,10 +171,27 @@ fun LocalMovieLibraryAppRoot(appContainer: AppContainer) {
                             val pickcode = item.pickcode ?: return@CloudBrowserScreen
                             navController.navigate(Route.player("cloud115://play/$pickcode", item.name, item.name))
                         },
+                        onPlayRandomVideos = { items, _ ->
+                            val queueItems = items.mapNotNull { item ->
+                                item.pickcode
+                                    ?.takeIf { it.isNotBlank() }
+                                    ?.let { pickcode ->
+                                        PlaybackQueueItem(
+                                            mediaUri = "cloud115://play/$pickcode",
+                                            title = item.name,
+                                            fileName = item.name
+                                        )
+                                    }
+                            }
+                            if (queueItems.isNotEmpty()) {
+                                val queueId = PlaybackQueueStore.put(queueItems)
+                                navController.navigate(Route.queuePlayer(queueId))
+                            }
+                        },
                         onMovieAdded = { }
                     )
                 }
-                composable(Route.Settings) {
+                composable(Route.Settings) { entry ->
                     val viewModel: SettingsViewModel = viewModel(
                         factory = SettingsViewModel.factory(
                             repository = appContainer.settingsRepository,
@@ -179,10 +202,54 @@ fun LocalMovieLibraryAppRoot(appContainer: AppContainer) {
                             asrModelManager = appContainer.asrModelManager
                         )
                     )
+                    val javdbCookieSaved by entry.savedStateHandle
+                        .getStateFlow("javdbCookieSaved", false)
+                        .collectAsState()
+                    val javlibraryCookieSaved by entry.savedStateHandle
+                        .getStateFlow("javlibraryCookieSaved", false)
+                        .collectAsState()
+                    LaunchedEffect(javdbCookieSaved) {
+                        if (javdbCookieSaved) {
+                            entry.savedStateHandle["javdbCookieSaved"] = false
+                            viewModel.refreshJavdbCookieStatus()
+                        }
+                    }
+                    LaunchedEffect(javlibraryCookieSaved) {
+                        if (javlibraryCookieSaved) {
+                            entry.savedStateHandle["javlibraryCookieSaved"] = false
+                            viewModel.refreshJavlibraryCookieStatus()
+                        }
+                    }
                     SettingsScreen(
                         viewModel = viewModel,
                         onOpenScrapeLogs = { navController.navigate(Route.ScrapeLogs) },
-                        onOpenMissavWeb = { navController.navigate(Route.missavCookieWeb("ADN-764")) }
+                        onOpenMissavWeb = { navController.navigate(Route.missavCookieWeb("ADN-764")) },
+                        onOpenJavdbWeb = { navController.navigate(Route.JavdbCookieWeb) },
+                        onOpenJavlibraryWeb = { navController.navigate(Route.JavlibraryCookieWeb) }
+                    )
+                }
+                composable(Route.JavdbCookieWeb) {
+                    JavdbCookieWebViewScreen(
+                        onBack = { navController.popBackStack() },
+                        onSaveCookie = { cookie ->
+                            appContainer.settingsRepository.saveJavdbCookies(cookie)
+                            navController.previousBackStackEntry
+                                ?.savedStateHandle
+                                ?.set("javdbCookieSaved", true)
+                            navController.popBackStack()
+                        }
+                    )
+                }
+                composable(Route.JavlibraryCookieWeb) {
+                    JavlibraryCookieWebViewScreen(
+                        onBack = { navController.popBackStack() },
+                        onSaveCookie = { cookie ->
+                            appContainer.settingsRepository.saveJavlibraryCookies(cookie)
+                            navController.previousBackStackEntry
+                                ?.savedStateHandle
+                                ?.set("javlibraryCookieSaved", true)
+                            navController.popBackStack()
+                        }
                     )
                 }
                 composable(
@@ -355,7 +422,40 @@ fun LocalMovieLibraryAppRoot(appContainer: AppContainer) {
                         onOpenJavzimuCookie = { url -> navController.navigate(Route.javzimuCookieWeb(url)) }
                     )
                 }
+                composable(
+                    route = Route.QueuePlayer,
+                    arguments = listOf(navArgument("queueId") { type = NavType.StringType })
+                ) { entry ->
+                    val queueId = entry.arguments?.getString("queueId") ?: return@composable
+                    val queueItems = remember(queueId) { PlaybackQueueStore.take(queueId) }
+                    if (queueItems.isEmpty()) {
+                        LaunchedEffect(queueId) { navController.popBackStack() }
+                    } else {
+                        val firstItem = queueItems.first()
+                        val application = LocalContext.current.applicationContext as android.app.Application
+                        val viewModel: PlayerViewModel = viewModel(
+                            key = "queue-player-$queueId",
+                            factory = PlayerViewModel.factory(
+                                application = application,
+                                videoUri = Uri.parse(firstItem.mediaUri),
+                                title = firstItem.title,
+                                fileName = firstItem.fileName,
+                                directLinkRepository = appContainer.directLinkRepository,
+                                cloudStrmRecordRepository = appContainer.cloudStrmRecordRepository,
+                                settingsRepository = appContainer.settingsRepository,
+                                playbackProgressRepository = appContainer.playbackProgressRepository,
+                                queueItems = queueItems
+                            )
+                        )
+                        PlayerScreen(
+                            viewModel = viewModel,
+                            onBack = { navController.popBackStack() },
+                            onOpenJavzimuCookie = { url -> navController.navigate(Route.javzimuCookieWeb(url)) }
+                        )
+                    }
+                }
             }
+            ScraperWebViewHost(fetcher = appContainer.javlibraryWebViewFetcher)
         }
     }
 }
@@ -440,10 +540,13 @@ private object Route {
     const val Settings = "settings"
     const val ScrapeLogs = "scrapeLogs"
     const val MissavCookieWeb = "missavCookieWeb/{number}"
+    const val JavdbCookieWeb = "javdbCookieWeb"
+    const val JavlibraryCookieWeb = "javlibraryCookieWeb"
     const val JavzimuCookieWeb = "javzimuCookieWeb/{url}"
     const val Detail = "movieDetail/{movieId}"
     const val FilterResult = "filterResult/{filterType}/{filterValue}"
     const val Player = "player/{videoUri}?title={title}&fileName={fileName}"
+    const val QueuePlayer = "queuePlayer/{queueId}"
 
     fun detail(movieId: Long) = "movieDetail/$movieId"
 
@@ -455,4 +558,6 @@ private object Route {
 
     fun player(videoUri: String, title: String, fileName: String) =
         "player/${Uri.encode(videoUri)}?title=${Uri.encode(title)}&fileName=${Uri.encode(fileName)}"
+
+    fun queuePlayer(queueId: String) = "queuePlayer/${Uri.encode(queueId)}"
 }

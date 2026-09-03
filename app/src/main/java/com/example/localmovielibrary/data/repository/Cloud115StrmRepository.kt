@@ -2,6 +2,7 @@
 
 import android.content.Context
 import android.net.Uri
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.example.localmovielibrary.cloud115.Cloud115Client
 import com.example.localmovielibrary.cloud115.Cloud115FileItem
@@ -9,8 +10,11 @@ import com.example.localmovielibrary.util.MovieVariant
 import com.example.localmovielibrary.util.detectMovieVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
 import com.example.localmovielibrary.util.playbackSourceSuffix
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import java.util.ArrayDeque
 
 class Cloud115StrmRepository(
     private val context: Context,
@@ -19,6 +23,83 @@ class Cloud115StrmRepository(
     private val recordRepository: CloudStrmRecordRepository
 ) {
     suspend fun listFiles(cid: Long): List<Cloud115FileItem> = cloud115Client.listFiles(cid)
+
+    /*
+     * ================================================================================
+     * 步骤1：递归收集文件夹视频
+     * ================================================================================
+     * 目标：为“随机播放本文件夹”构建完整的视频候选集。
+     * 数据源：115 目录列表接口返回的文件和子目录。
+     * 操作：
+     * 1) 递归读取当前目录及子目录。
+     * 2) 只保留带 pickcode 的支持格式视频，并用 CID 防止异常目录环路。
+     */
+    suspend fun listVideoFilesRecursively(rootCid: Long): List<Cloud115FileItem> = withContext(Dispatchers.IO) {
+        Log.i(TAG, "开始递归读取随机播放目录，rootCid=$rootCid")
+        val visitedCids = mutableSetOf<Long>()
+
+        /*
+         * ================================================================================
+         * 步骤2：按队列递归读取目录
+         * ================================================================================
+         * 目标：让单个子目录失败不会丢掉已经找到的视频。
+         * 数据源：待访问 CID 队列和每个目录的文件列表。
+         * 操作：
+         * 1) 显式维护待访问队列，避免嵌套 flatMap 的异常传播歧义。
+         * 2) 根目录失败才终止；子目录 405 或网络错误则停止继续扩大请求并保留部分结果。
+         */
+        val pendingCids = ArrayDeque<Long>().apply { add(rootCid) }
+        val videos = mutableListOf<Cloud115FileItem>()
+        var skippedDirectories = 0
+        var stoppedByRateLimit = false
+        var lastDirectoryRequestAt = 0L
+
+        while (pendingCids.isNotEmpty()) {
+            val cid = pendingCids.removeFirst()
+            if (!visitedCids.add(cid)) continue
+
+            val items = try {
+                val now = System.currentTimeMillis()
+                val waitMs = (RANDOM_SCAN_INTERVAL_MS - (now - lastDirectoryRequestAt)).coerceAtLeast(0L)
+                if (waitMs > 0L) delay(waitMs)
+                lastDirectoryRequestAt = System.currentTimeMillis()
+                cloud115Client.listFiles(cid)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Throwable) {
+                if (cid == rootCid) {
+                    Log.i(TAG, "随机播放根目录读取失败，cid=$cid，原因=${error.message}")
+                    throw error
+                }
+                skippedDirectories += 1
+                val isRateLimit = error.message?.contains("HTTP 405") == true
+                Log.i(TAG, "跳过无法读取的随机播放子目录，cid=$cid，原因=${error.message}")
+                if (isRateLimit) {
+                    stoppedByRateLimit = true
+                    break
+                }
+                continue
+            }
+
+            videos += items.filter { item ->
+                !item.isDirectory &&
+                    item.pickcode?.isNotBlank() == true &&
+                    item.isVideoFile()
+            }
+            items.asSequence()
+                .filter { it.isDirectory }
+                .mapNotNull { it.cid }
+                .filterNot { it in visitedCids }
+                .forEach(pendingCids::addLast)
+        }
+
+        val result = videos.distinctBy { it.pickcode }
+        Log.i(
+            TAG,
+            "随机播放目录读取完成，视频数=${result.size}，已访问目录=${visitedCids.size}，跳过目录=$skippedDirectories，因限流停止=$stoppedByRateLimit"
+        )
+        result
+    }
 
     suspend fun existingPickcodesForVisibleItems(items: List<Cloud115FileItem>): Set<String> = withContext(Dispatchers.IO) {
         val videoItemsByPickcode = items
@@ -30,7 +111,11 @@ class Cloud115StrmRepository(
             }
             .toMap()
         val records = recordRepository.existingRecordsForVisibleItems(videoItemsByPickcode.keys)
+        val libraryRootUri = settingsRepository.getLibraryRootUri()
         records
+            .filter { record ->
+                libraryRootUri != null && recordRepository.isFinalizedInLibrary(record.pickcode, libraryRootUri)
+            }
             .filter { record ->
                 val itemNumber = videoItemsByPickcode[record.pickcode]
                     ?.name
@@ -53,7 +138,8 @@ class Cloud115StrmRepository(
         if (!forceDistinct) {
             recordRepository.getCached(pickcode)
                 ?.takeIf { existing ->
-                    segmentInfo == null || existing.movieNumber == segmentInfo.number
+                    (segmentInfo == null || existing.movieNumber == segmentInfo.number) &&
+                        canOpenUri(existing.strmUri)
                 }
                 ?.let { existing ->
                 return@withContext GeneratedStrmFile(
@@ -137,7 +223,7 @@ class Cloud115StrmRepository(
             pickcode = pickcode,
             fileName = file.name,
             strmUri = file.uri,
-            libraryRootUri = settingsRepository.getLibraryRootUri()
+            libraryRootUri = null
         )
         GeneratedStrmFile(
             fileName = file.name,
@@ -172,6 +258,11 @@ class Cloud115StrmRepository(
         return WrittenStrmFile(name = fileName, uri = file.uri.toString())
     }
 
+    private fun canOpenUri(uriString: String): Boolean =
+        runCatching {
+            context.contentResolver.openInputStream(Uri.parse(uriString))?.use { true } == true
+        }.getOrDefault(false)
+
     private fun uniqueStrmName(root: DocumentFile, baseName: String, pickcode: String): String {
         val first = "$baseName.strm"
         if (root.findFile(first) == null) return first
@@ -179,17 +270,28 @@ class Cloud115StrmRepository(
     }
 
     private suspend fun findExistingMovieDirectoryFast(root: DocumentFile, number: String): DocumentFile? {
-        recordRepository.getByMovieNumber(number)
+        val roots = buildList {
+            settingsRepository.getLibraryRootUri()?.let { uriString ->
+                DocumentFile.fromTreeUri(context, Uri.parse(uriString))?.let { add(uriString to it) }
+            }
+            settingsRepository.getStrmTreeUri()?.let { uriString ->
+                if (none { it.first == uriString }) {
+                    add(uriString to root)
+                }
+            }
+        }
+        return recordRepository.getByMovieNumber(number)
             .asSequence()
-            .mapNotNull { record -> findParentDirectory(root, record.strmUri) }
+            .mapNotNull { record ->
+                roots.firstNotNullOfOrNull { (rootUri, candidateRoot) ->
+                    findParentDirectory(candidateRoot, rootUri, record.strmUri)
+                }
+            }
             .firstOrNull()
-            ?.let { return it }
-        return null
     }
 
-    private fun findParentDirectory(root: DocumentFile, fileUriString: String): DocumentFile? {
-        val treeUri = settingsRepository.getStrmTreeUri() ?: return null
-        val rootDocId = Uri.parse(treeUri).treeDocumentId() ?: return null
+    private fun findParentDirectory(root: DocumentFile, rootUriString: String, fileUriString: String): DocumentFile? {
+        val rootDocId = Uri.parse(rootUriString).treeDocumentId() ?: return null
         val fileDocId = Uri.parse(fileUriString).documentId() ?: return null
         val parentDocId = fileDocId.substringBeforeLast('/', missingDelimiterValue = "")
         if (parentDocId.isBlank() || parentDocId == rootDocId) return null
@@ -226,6 +328,8 @@ class Cloud115StrmRepository(
         replace(Regex("""[\\/:*?"<>|]"""), "_").trim().ifBlank { "video" }
 
     companion object {
+        private const val TAG = "Cloud115StrmRepository"
+        private const val RANDOM_SCAN_INTERVAL_MS = 700L
         val VIDEO_EXTENSIONS = listOf(".mp4", ".mkv", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".iso", ".flv", ".webm")
     }
 }

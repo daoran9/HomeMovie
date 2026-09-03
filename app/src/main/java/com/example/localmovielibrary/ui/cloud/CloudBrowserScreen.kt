@@ -22,14 +22,16 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.material.icons.rounded.LibraryAdd
+import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.VideoFile
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -38,7 +40,10 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
@@ -72,13 +77,14 @@ import java.util.Date
 import java.util.Locale
 
 private val CloudBackground = Color(0xFF070A0E)
-private val CloudPanel = Color.White.copy(alpha = 0.075f)
+private val CloudPanel = Color.White.copy(alpha = 0.052f)
 
 @Composable
 fun CloudBrowserScreen(
     viewModel: CloudBrowserViewModel,
     onBack: () -> Unit,
     onPlayVideo: (Cloud115FileItem) -> Unit,
+    onPlayRandomVideos: (List<Cloud115FileItem>, String) -> Unit,
     onMovieAdded: (Long) -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
@@ -116,6 +122,11 @@ fun CloudBrowserScreen(
         val movieId = uiState.openMovieId ?: return@LaunchedEffect
         viewModel.consumeOpenMovie()
         onMovieAdded(movieId)
+    }
+
+    LaunchedEffect(uiState.randomPlaybackItems) {
+        val items = viewModel.consumeRandomPlaybackItems() ?: return@LaunchedEffect
+        onPlayRandomVideos(items, uiState.path.joinToString(" / ") { it.name })
     }
 
     LaunchedEffect(uiState.scrollResetVersion, currentFolderCid) {
@@ -180,8 +191,15 @@ fun CloudBrowserScreen(
                 sortOption = uiState.sortOption,
                 onSortOptionSelected = viewModel::setSortOption,
                 sortAscending = uiState.sortAscending,
-                onToggleSortDirection = viewModel::toggleSortDirection
+                onToggleSortDirection = viewModel::toggleSortDirection,
+                isRandomPlaybackLoading = uiState.isRandomPlaybackLoading,
+                onPlayRandom = viewModel::playRandomFolder
             )
+
+            val folderProgress = uiState.folderBatchProgress
+            if (uiState.addingFolderCids.isNotEmpty() && folderProgress != null) {
+                FolderBatchProgressBanner(progress = folderProgress)
+            }
 
             when {
                 uiState.isLoading -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -198,10 +216,13 @@ fun CloudBrowserScreen(
                     isDomesticRoot = viewModel.domesticRootCid()?.let { currentFolderCid == it } == true,
                     addingDomesticFolderCids = uiState.addingDomesticFolderCids,
                     addedDomesticFolderCids = uiState.addedDomesticFolderCids,
+                    addingFolderCids = uiState.addingFolderCids,
+                    addedFolderCids = uiState.addedFolderCids,
                     onOpenFolder = viewModel::openFolder,
                     onPlayVideo = onPlayVideo,
                     onAddVideo = viewModel::addVideoToLibrary,
-                    onAddDomesticFolder = viewModel::addDomesticFolder
+                    onAddDomesticFolder = viewModel::addDomesticFolder,
+                    onAddFolder = viewModel::addFolderToLibrary
                 )
             }
         }
@@ -215,6 +236,49 @@ fun CloudBrowserScreen(
 }
 
 @Composable
+private fun FolderBatchProgressBanner(progress: FolderBatchProgress) {
+    val fraction = if (progress.total > 0) {
+        (progress.current.toFloat() / progress.total.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.06f))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = if (progress.total > 0) {
+                "整目录入库：${progress.current}/${progress.total}"
+            } else {
+                "正在扫描整目录：${progress.folderName}"
+            },
+            color = Color.White,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        LinearProgressIndicator(
+            progress = { fraction },
+            modifier = Modifier.fillMaxWidth(),
+            color = Color(0xFF76D48A),
+            trackColor = Color.White.copy(alpha = 0.12f)
+        )
+        Text(
+            text = "成功 ${progress.success} · 跳过 ${progress.skipped} · 失败 ${progress.failed}" +
+                (progress.currentFileName?.let { " · $it" } ?: ""),
+            color = Color.White.copy(alpha = 0.58f),
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
 private fun CloudTopBar(
     path: List<CloudPathItem>,
     canGoBackFolder: Boolean,
@@ -222,7 +286,9 @@ private fun CloudTopBar(
     sortOption: CloudSortOption,
     onSortOptionSelected: (CloudSortOption) -> Unit,
     sortAscending: Boolean,
-    onToggleSortDirection: () -> Unit
+    onToggleSortDirection: () -> Unit,
+    isRandomPlaybackLoading: Boolean,
+    onPlayRandom: () -> Unit
 ) {
     var sortMenuExpanded by remember { androidx.compose.runtime.mutableStateOf(false) }
     Column(
@@ -258,6 +324,28 @@ private fun CloudTopBar(
                     .weight(1f)
                     .padding(start = 8.dp)
             )
+            Box {
+                IconButton(
+                    onClick = onPlayRandom,
+                    enabled = !isRandomPlaybackLoading,
+                    modifier = Modifier.size(40.dp)
+                ) {
+                    if (isRandomPlaybackLoading) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            strokeWidth = 2.dp,
+                            modifier = Modifier.size(18.dp)
+                        )
+                    } else {
+                        Icon(
+                            imageVector = Icons.Rounded.Shuffle,
+                            contentDescription = "随机播放本文件夹",
+                            tint = Color.White,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                }
+            }
             Box {
                 Text(
                     text = sortOption.label,
@@ -315,16 +403,19 @@ private fun CloudFileList(
     isDomesticRoot: Boolean,
     addingDomesticFolderCids: Set<Long>,
     addedDomesticFolderCids: Set<Long>,
+    addingFolderCids: Set<Long>,
+    addedFolderCids: Set<Long>,
     onOpenFolder: (Cloud115FileItem) -> Unit,
     onPlayVideo: (Cloud115FileItem) -> Unit,
     onAddVideo: (Cloud115FileItem) -> Unit,
-    onAddDomesticFolder: (Cloud115FileItem) -> Unit
+    onAddDomesticFolder: (Cloud115FileItem) -> Unit,
+    onAddFolder: (Cloud115FileItem) -> Unit
 ) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-        contentPadding = PaddingValues(14.dp)
+        verticalArrangement = Arrangement.spacedBy(3.dp),
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
     ) {
         items(
             items = items,
@@ -345,10 +436,14 @@ private fun CloudFileList(
                 showDomesticAdd = isDomesticRoot && item.isDirectory && item.cid != null,
                 isDomesticAdding = item.cid != null && item.cid in addingDomesticFolderCids,
                 isDomesticAdded = item.cid != null && item.cid in addedDomesticFolderCids,
+                showCloudFolderAdd = !isDomesticRoot && item.isDirectory && item.cid != null,
+                isCloudFolderAdding = item.cid != null && item.cid in addingFolderCids,
+                isCloudFolderAdded = item.cid != null && item.cid in addedFolderCids,
                 onOpenFolder = { onOpenFolder(item) },
                 onPlayVideo = { onPlayVideo(item) },
                 onAddVideo = { onAddVideo(item) },
-                onAddDomesticFolder = { onAddDomesticFolder(item) }
+                onAddDomesticFolder = { onAddDomesticFolder(item) },
+                onAddFolder = { onAddFolder(item) }
             )
         }
     }
@@ -364,10 +459,14 @@ private fun CloudFileRow(
     showDomesticAdd: Boolean,
     isDomesticAdding: Boolean,
     isDomesticAdded: Boolean,
+    showCloudFolderAdd: Boolean,
+    isCloudFolderAdding: Boolean,
+    isCloudFolderAdded: Boolean,
     onOpenFolder: () -> Unit,
     onPlayVideo: () -> Unit,
     onAddVideo: () -> Unit,
-    onAddDomesticFolder: () -> Unit
+    onAddDomesticFolder: () -> Unit,
+    onAddFolder: () -> Unit
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
@@ -381,7 +480,7 @@ private fun CloudFileRow(
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(14.dp))
                 .background(CloudPanel)
                 .then(
                     when {
@@ -395,14 +494,12 @@ private fun CloudFileRow(
                         else -> Modifier
                     }
                 )
-                .padding(14.dp),
+                .padding(horizontal = 10.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
             Box(
                 modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(Color.White.copy(alpha = 0.10f)),
+                    .size(34.dp),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
@@ -414,15 +511,15 @@ private fun CloudFileRow(
             Column(
                 modifier = Modifier
                     .weight(1f)
-                    .padding(horizontal = 10.dp),
-                verticalArrangement = Arrangement.spacedBy(3.dp)
+                    .padding(horizontal = 8.dp),
+                verticalArrangement = Arrangement.spacedBy(2.dp)
             ) {
                 Text(
                     text = item.name,
                     color = Color.White,
                     style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 3,
+                    fontWeight = FontWeight.Medium,
+                    maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
                 Text(
@@ -437,7 +534,16 @@ private fun CloudFileRow(
                 showDomesticAdd -> AddVideoButton(
                     isAdding = isDomesticAdding,
                     isAdded = isDomesticAdded,
-                    onAddVideo = onAddDomesticFolder
+                    onAddVideo = onAddDomesticFolder,
+                    label = "添加文件夹",
+                    iconOnly = true
+                )
+                showCloudFolderAdd -> AddVideoButton(
+                    isAdding = isCloudFolderAdding,
+                    isAdded = isCloudFolderAdded,
+                    onAddVideo = onAddFolder,
+                    label = "整目录入库",
+                    iconOnly = true
                 )
                 item.isDirectory -> Unit
                 item.isVideoFile() && !isExcludedVideo -> AddVideoButton(isAdding = isAdding, isAdded = isAdded, onAddVideo = onAddVideo)
@@ -469,7 +575,45 @@ private val CloudSortOption.label: String
     }
 
 @Composable
-private fun AddVideoButton(isAdding: Boolean, isAdded: Boolean, onAddVideo: () -> Unit) {
+private fun AddVideoButton(
+    isAdding: Boolean,
+    isAdded: Boolean,
+    onAddVideo: () -> Unit,
+    label: String = "添加",
+    iconOnly: Boolean = false
+) {
+    if (iconOnly) {
+        Box(
+            modifier = Modifier.size(36.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            when {
+                isAdding -> CircularProgressIndicator(
+                    color = Color(0xFF78CDBA),
+                    strokeWidth = 2.dp,
+                    modifier = Modifier.size(18.dp)
+                )
+                isAdded -> Icon(
+                    imageVector = Icons.Rounded.CheckCircle,
+                    contentDescription = "已添加",
+                    tint = Color(0xFF78CDBA),
+                    modifier = Modifier.size(20.dp)
+                )
+                else -> IconButton(
+                    onClick = onAddVideo,
+                    modifier = Modifier.size(36.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.LibraryAdd,
+                        contentDescription = label,
+                        tint = Color(0xFF78CDBA),
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+            }
+        }
+        return
+    }
     if (isAdded) {
         Text(
             text = "已添加",
@@ -488,13 +632,20 @@ private fun AddVideoButton(isAdding: Boolean, isAdded: Boolean, onAddVideo: () -
         )
         return
     }
-    Button(
+    OutlinedButton(
         onClick = onAddVideo,
         shape = RoundedCornerShape(14.dp),
-        contentPadding = PaddingValues(horizontal = 11.dp, vertical = 6.dp),
-        modifier = Modifier.height(34.dp)
+        contentPadding = PaddingValues(horizontal = 9.dp, vertical = 3.dp),
+        modifier = Modifier.height(30.dp),
+        colors = ButtonDefaults.outlinedButtonColors(
+            contentColor = Color(0xFF78CDBA)
+        ),
+        border = androidx.compose.foundation.BorderStroke(
+            width = 1.dp,
+            color = Color(0xFF3B927E).copy(alpha = 0.72f)
+        )
     ) {
-        Text("添加", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Bold)
+        Text(label, style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium)
     }
 }
 

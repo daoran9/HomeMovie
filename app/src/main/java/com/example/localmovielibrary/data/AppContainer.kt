@@ -18,6 +18,7 @@ import com.example.localmovielibrary.data.repository.MovieRepository
 import com.example.localmovielibrary.data.repository.PlaybackProgressRepository
 import com.example.localmovielibrary.data.repository.StrmScrapeRepository
 import com.example.localmovielibrary.scanner.LibraryScanner
+import com.example.localmovielibrary.scraper.JavlibraryWebViewFetcher
 
 class AppContainer(context: Context) {
     private val appContext = context.applicationContext
@@ -43,6 +44,7 @@ class AppContainer(context: Context) {
     val asrModelManager = AsrModelManager(appContext, settingsRepository)
     val cloud115Client = Cloud115ApiClient(Cloud115CookieProvider(appContext))
     val cloud115QrLoginClient = Cloud115QrLoginClient(appContext, settingsRepository)
+    val javlibraryWebViewFetcher = JavlibraryWebViewFetcher()
     val cloudStrmRecordRepository = CloudStrmRecordRepository(
         context = appContext,
         dao = database.cloudStrmRecordDao(),
@@ -54,10 +56,6 @@ class AppContainer(context: Context) {
         cloud115Client = cloud115Client,
         settingsRepository = settingsRepository,
         recordRepository = cloudStrmRecordRepository
-    )
-    val strmScrapeRepository = StrmScrapeRepository(
-        context = appContext,
-        settingsRepository = settingsRepository
     )
     val directLinkRepository = DirectLinkRepository(
         directLinkDao = database.directLinkDao(),
@@ -77,6 +75,12 @@ class AppContainer(context: Context) {
         cloudStrmRecordDao = database.cloudStrmRecordDao(),
         scanner = scanner,
         contentResolver = appContext.contentResolver
+    )
+    val strmScrapeRepository = StrmScrapeRepository(
+        context = appContext,
+        settingsRepository = settingsRepository,
+        javlibraryWebViewFetcher = javlibraryWebViewFetcher,
+        refreshMovieMetadata = movieRepository::refreshMovie
     )
 
     private companion object {

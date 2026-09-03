@@ -1,6 +1,8 @@
 ﻿package com.example.localmovielibrary.ui.settings
 
 import android.net.Uri
+import android.provider.DocumentsContract
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -16,6 +18,7 @@ import com.example.localmovielibrary.data.repository.AppSettingsRepository
 import com.example.localmovielibrary.data.repository.CloudStrmRecordRepository
 import com.example.localmovielibrary.data.repository.MovieRepository
 import com.example.localmovielibrary.data.repository.StrmScrapeRepository
+import com.example.localmovielibrary.data.repository.ActorAvatarUpdateState
 import com.example.localmovielibrary.scraper.ScrapeSource
 import com.example.localmovielibrary.subtitle.SubtitleSearchProvider
 import com.example.localmovielibrary.translate.TranslateProvider
@@ -40,6 +43,7 @@ class SettingsViewModel(
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(loadState())
     val uiState: StateFlow<SettingsUiState> = _uiState
+    val actorAvatarUpdateState: StateFlow<ActorAvatarUpdateState> = scrapeRepository.actorAvatarUpdateState
     private var qrLoginJob: Job? = null
     private var asrDownloadJob: Job? = null
 
@@ -125,7 +129,7 @@ class SettingsViewModel(
         }
         qrLoginJob = viewModelScope.launch {
             runCatching {
-                val token = cloud115QrLoginClient.requestToken()
+                val token = cloud115QrLoginClient.requestToken(loginApp)
                 _uiState.update {
                     it.copy(
                         cloud115QrToken = token,
@@ -211,6 +215,14 @@ class SettingsViewModel(
         _uiState.value = loadState().copy(savedMessage = "MissAV Cookie 已保存")
     }
 
+    fun refreshJavdbCookieStatus() {
+        _uiState.update { it.copy(javdbCookies = repository.getJavdbCookies()) }
+    }
+
+    fun refreshJavlibraryCookieStatus() {
+        _uiState.update { it.copy(javlibraryCookies = repository.getJavlibraryCookies()) }
+    }
+
     fun updateBaseUrl(value: String) {
         _uiState.update { it.copy(strmBaseUrl = value, savedMessage = null) }
     }
@@ -228,6 +240,30 @@ class SettingsViewModel(
     fun updateScrapeConcurrencyLimit(value: String) {
         val cleaned = value.filter { it.isDigit() }.take(1)
         _uiState.update { it.copy(scrapeConcurrencyLimitText = cleaned, savedMessage = null) }
+    }
+
+    /*
+     * ============================================================================================================
+     * 步骤：切换 gfriends 演员头像兜底
+     * ============================================================================================================
+     * 目标：让用户决定是否允许使用 gfriends 补齐其它来源未找到的头像。
+     * 数据源：设置页开关与本地 SharedPreferences。
+     * 操作：
+     * 1) 立即保存开关，后续刮削无需等待离开设置页。
+     * 2) 更新页面状态并提示当前状态。
+    */
+    fun updateGfriendsActorAvatarEnabled(enabled: Boolean) {
+        Log.i(TAG, "开始切换 gfriends 演员头像兜底：$enabled")
+        // 1.1 持久化当前选择，供所有刮削入口直接读取。
+        repository.saveGfriendsActorAvatarEnabled(enabled)
+        // 1.2 刷新页面状态，使头像说明同步切换。
+        _uiState.update {
+            it.copy(
+                gfriendsActorAvatarEnabled = enabled,
+                savedMessage = if (enabled) "已启用 gfriends 头像兜底" else "已关闭 gfriends 头像兜底"
+            )
+        }
+        Log.i(TAG, "gfriends 演员头像兜底切换完成：$enabled")
     }
 
     fun updateNewDmm2SkippedPrefix(value: String) {
@@ -474,8 +510,11 @@ class SettingsViewModel(
         val state = _uiState.value
         repository.saveCookies(state.cookies)
         repository.saveMissavCookies(state.missavCookies)
+        repository.saveJavdbCookies(state.javdbCookies)
+        repository.saveJavlibraryCookies(state.javlibraryCookies)
         repository.saveStrmBaseUrl(state.strmBaseUrl)
         repository.saveDefaultScrapeSource(state.defaultScrapeSource)
+        repository.saveGfriendsActorAvatarEnabled(state.gfriendsActorAvatarEnabled)
         repository.saveImageDownloadRetryCount(state.imageDownloadRetryCountText.toIntOrNull() ?: AppSettingsRepository.DEFAULT_IMAGE_DOWNLOAD_RETRY_COUNT)
         repository.saveScrapeConcurrencyLimit(state.scrapeConcurrencyLimitText.toIntOrNull() ?: AppSettingsRepository.DEFAULT_SCRAPE_CONCURRENCY_LIMIT)
         repository.saveDmm2SkippedNumberPrefixes(state.dmm2SkippedPrefixes.toSet())
@@ -502,11 +541,64 @@ class SettingsViewModel(
     }
 
     fun saveStrmDirectory(uri: Uri) {
+        /*
+         * ============================================================================================================
+         * 步骤1：校验 STRM 保存目录
+         * ============================================================================================================
+         * 目标：保持 STRM 目录与影片库目录职责分离。
+         * 操作：
+         * 1) 比较 SAF tree URI 对应的真实目录。
+         * 2) 拒绝与影片库相同的目录，避免两个配置互相覆盖。
+         */
+        Log.i(TAG, "开始保存 STRM 目录")
+        if (isSameTree(uri, repository.getLibraryRootUri())) {
+            // 1.1 返回可见提示，不写入错误配置
+            _uiState.value = loadState().copy(savedMessage = "STRM 目录不能与影片库目录相同，请选择其他目录")
+            Log.i(TAG, "STRM 目录校验失败：与影片库目录相同")
+            return
+        }
+
+        /*
+         * ============================================================================================================
+         * 步骤2：保存 STRM 目录
+         * ============================================================================================================
+         * 目标：只更新 STRM 配置，不触碰影片库配置。
+         * 操作：
+         * 1) 持久化 SAF 授权与 STRM tree URI。
+         * 2) 重新加载页面状态。
+         */
         repository.saveStrmTreeUri(uri)
         _uiState.value = loadState().copy(savedMessage = "STRM 保存位置已更新")
+        Log.i(TAG, "STRM 目录保存完成")
     }
 
     fun scanLibrary(uri: Uri) {
+        /*
+         * ============================================================================================================
+         * 步骤1：校验影片库目录
+         * ============================================================================================================
+         * 目标：保持影片库目录与 STRM 目录职责分离。
+         * 操作：
+         * 1) 比较 SAF tree URI 对应的真实目录。
+         * 2) 拒绝与 STRM 相同的目录，避免扫描临时 STRM 文件。
+         */
+        Log.i(TAG, "开始保存影片库目录")
+        if (isSameTree(uri, repository.getStrmTreeUri())) {
+            // 1.1 返回可见提示，不保存也不启动扫描
+            _uiState.value = loadState().copy(savedMessage = "影片库目录不能与 STRM 目录相同，请选择其他目录")
+            Log.i(TAG, "影片库目录校验失败：与 STRM 目录相同")
+            return
+        }
+
+        /*
+         * ============================================================================================================
+         * 步骤2：保存并扫描影片库目录
+         * ============================================================================================================
+         * 目标：只更新影片库配置，再扫描该目录中的本地影片。
+         * 操作：
+         * 1) 持久化 SAF 授权与影片库 tree URI。
+         * 2) 异步扫描影片库并刷新页面状态。
+         */
         repository.saveLibraryRootUri(uri)
         _uiState.update { it.copy(isScanning = true, savedMessage = null) }
         viewModelScope.launch {
@@ -518,6 +610,19 @@ class SettingsViewModel(
                     _uiState.value = loadState().copy(savedMessage = error.message ?: "影片库扫描失败")
                 }
         }
+        Log.i(TAG, "影片库目录已保存，扫描任务已启动")
+    }
+
+    private fun isSameTree(uri: Uri, storedUriString: String?): Boolean {
+        if (storedUriString.isNullOrBlank()) {
+            return false
+        }
+        val storedUri = Uri.parse(storedUriString)
+        val currentDocumentId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
+        val storedDocumentId = runCatching { DocumentsContract.getTreeDocumentId(storedUri) }.getOrNull()
+        return uri.authority == storedUri.authority &&
+            currentDocumentId != null &&
+            currentDocumentId == storedDocumentId
     }
 
     fun reorganizeExistingLibraries() {
@@ -552,6 +657,45 @@ class SettingsViewModel(
         }
     }
 
+    /*
+     * ================================================================================
+     * 步骤1：启动全库演员头像补齐
+     * ================================================================================
+     * 目标：让设置页可以处理当前数据库中所有影片的缺失头像。
+     * 数据源：Room 中的轻量影片记录；下载和多源回退由刮削仓库负责。
+     * 操作：
+     * 1) 在 IO 线程读取影片和演员列表。
+     * 2) 交给仓库后台任务，避免阻塞设置页。
+     */
+    fun updateMissingActorAvatars() {
+        if (actorAvatarUpdateState.value.isUpdating) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(savedMessage = "正在读取影片演员列表...") }
+            runCatching { movieRepository.getMoviesForActorAvatarUpdate() }
+                .onSuccess { movies ->
+                    scrapeRepository.startUpdateMissingActorAvatars(
+                        movies = movies,
+                        forceRefresh = true,
+                        allowGfriends = repository.isGfriendsActorAvatarEnabled()
+                    )
+                    _uiState.update {
+                        it.copy(
+                            savedMessage = if (repository.isGfriendsActorAvatarEnabled()) {
+                                "已开始全库重匹配演员头像（包含 gfriends 兜底）"
+                            } else {
+                                "已开始全库重匹配演员头像（不使用 gfriends）"
+                            }
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update {
+                        it.copy(savedMessage = error.message ?: "读取影片演员列表失败")
+                    }
+                }
+        }
+    }
+
     fun rebuildCloudStrmIndex() {
         _uiState.update { it.copy(isRebuildingStrmIndex = true, savedMessage = null) }
         viewModelScope.launch {
@@ -575,12 +719,15 @@ class SettingsViewModel(
         SettingsUiState(
             cookies = repository.getCookies(),
             missavCookies = repository.getMissavCookies(),
+            javdbCookies = repository.getJavdbCookies(),
+            javlibraryCookies = repository.getJavlibraryCookies(),
             strmTreeUri = repository.getStrmTreeUri(),
             strmTreeDisplayName = repository.getStrmTreeDisplayName(),
             libraryRootUri = repository.getLibraryRootUri(),
             libraryRootDisplayName = repository.getLibraryRootDisplayName(),
             strmBaseUrl = repository.getStrmBaseUrl(),
             defaultScrapeSource = repository.getDefaultScrapeSource(),
+            gfriendsActorAvatarEnabled = repository.isGfriendsActorAvatarEnabled(),
             imageDownloadRetryCountText = repository.getImageDownloadRetryCount().toString(),
             scrapeConcurrencyLimitText = repository.getScrapeConcurrencyLimit().toString(),
             dmm2SkippedPrefixes = repository.getDmm2SkippedNumberPrefixes().toList().sorted(),
@@ -617,6 +764,7 @@ class SettingsViewModel(
         )
 
     companion object {
+        private const val TAG = "SettingsViewModel"
         private const val QR_LOGIN_POLL_INTERVAL_MS = 1_500L
 
         fun factory(
@@ -650,12 +798,15 @@ class SettingsViewModel(
 data class SettingsUiState(
     val cookies: String = "",
     val missavCookies: String = "",
+    val javdbCookies: String = "",
+    val javlibraryCookies: String = "",
     val strmTreeUri: String? = null,
     val strmTreeDisplayName: String = "尚未选择目录",
     val libraryRootUri: String? = null,
     val libraryRootDisplayName: String = "尚未选择目录",
     val strmBaseUrl: String = AppSettingsRepository.DEFAULT_STRM_BASE_URL,
     val defaultScrapeSource: ScrapeSource = ScrapeSource.Dmm2,
+    val gfriendsActorAvatarEnabled: Boolean = false,
     val imageDownloadRetryCountText: String = AppSettingsRepository.DEFAULT_IMAGE_DOWNLOAD_RETRY_COUNT.toString(),
     val scrapeConcurrencyLimitText: String = AppSettingsRepository.DEFAULT_SCRAPE_CONCURRENCY_LIMIT.toString(),
     val dmm2SkippedPrefixes: List<String> = emptyList(),
@@ -707,5 +858,11 @@ data class SettingsUiState(
 ) {
     val hasMissavCookie: Boolean
         get() = missavCookies.isNotBlank()
+
+    val hasJavdbCookie: Boolean
+        get() = javdbCookies.isNotBlank()
+
+    val hasJavlibraryCookie: Boolean
+        get() = javlibraryCookies.isNotBlank()
 }
 

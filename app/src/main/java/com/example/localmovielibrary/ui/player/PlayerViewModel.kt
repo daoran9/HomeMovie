@@ -2,6 +2,7 @@
 
 import android.app.Application
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
@@ -26,6 +27,7 @@ import com.example.localmovielibrary.diagnostics.RuntimeErrorLog
 import com.example.localmovielibrary.playback.DEFAULT_USER_AGENT
 import com.example.localmovielibrary.playback.PickcodeExtractor
 import com.example.localmovielibrary.playback.PlaybackRequest
+import com.example.localmovielibrary.playback.PlaybackQueueItem
 import com.example.localmovielibrary.playback.PlaybackResolver
 import com.example.localmovielibrary.playback.SubtitleRenderersFactory
 import com.example.localmovielibrary.playback.vr.VrControlMode
@@ -58,14 +60,32 @@ import kotlin.math.abs
 
 class PlayerViewModel(
     private val application: Application,
-    private val videoUri: Uri,
+    videoUri: Uri,
     title: String,
-    private val fileName: String,
+    fileName: String,
     directLinkRepository: DirectLinkRepository,
     private val cloudStrmRecordRepository: CloudStrmRecordRepository,
     private val settingsRepository: AppSettingsRepository,
-    private val playbackProgressRepository: PlaybackProgressRepository
+    private val playbackProgressRepository: PlaybackProgressRepository,
+    queueItems: List<PlaybackQueueItem> = emptyList()
 ) : AndroidViewModel(application) {
+    /*
+     * ================================================================================
+     * 步骤1：建立逻辑播放队列
+     * ================================================================================
+     * 目标：兼容原有单片播放，同时支持文件夹随机连续播放。
+     * 数据源：导航传入的单片 URI 或一次性播放队列。
+     * 操作：
+     * 1) 队列只保存逻辑 URI、标题和文件名，不提前保存 115 直链。
+     * 2) 播放结束后切换当前项，再由 PlaybackResolver 获取最新直链。
+     */
+    private val playbackQueue = queueItems
+        .takeIf { it.isNotEmpty() }
+        ?: listOf(PlaybackQueueItem(videoUri.toString(), title, fileName))
+    private var currentQueueIndex = 0
+    private var isAdvancingQueue = false
+    private var videoUri = Uri.parse(playbackQueue.first().mediaUri)
+    private var fileName = playbackQueue.first().fileName
     private val speeds = listOf(0.75f, 1.0f, 1.25f, 1.5f, 2.0f, 2.5f, 3.0f, 4.0f)
     private var speedIndex = 1
     private val resolver = PlaybackResolver(application.contentResolver, directLinkRepository)
@@ -91,7 +111,8 @@ class PlayerViewModel(
     private var retriedAfterForbidden = false
     private val vrModeSettings = VrModeSettings(application)
 
-    val title: String = title.ifBlank { "Movie" }
+    var title: String = playbackQueue.first().title.ifBlank { "Movie" }
+        private set
 
     private val _uiState = MutableStateFlow(
         PlayerUiState(
@@ -107,13 +128,33 @@ class PlayerViewModel(
         get() = speeds[speedIndex]
 
     init {
+        loadCurrentQueueItem()
+    }
+
+    /*
+     * ================================================================================
+     * 步骤2：解析并加载当前队列项
+     * ================================================================================
+     * 目标：让单片播放和随机队列共用同一套直链、字幕和断点逻辑。
+     * 数据源：当前队列项的 cloud115 URI 或本地/STRM URI。
+     * 操作：
+     * 1) 解析当前媒体地址并获取字幕存储位置。
+     * 2) 恢复当前项断点，创建 ExoPlayer 并更新 UI 状态。
+     */
+    private fun loadCurrentQueueItem(
+        forceRefresh: Boolean = false,
+        resumePositionOverride: Long? = null
+    ) {
         viewModelScope.launch {
-            resolver.resolve(videoUri.toString(), this@PlayerViewModel.title, fileName)
+            Log.i(TAG, "开始加载播放项，index=$currentQueueIndex/${playbackQueue.size}")
+            _uiState.update { it.copy(isLoading = true, errorMessage = null, player = null) }
+            resolver.resolve(videoUri.toString(), title, fileName, forceRefresh = forceRefresh)
                 .onSuccess { request ->
                     val resolvedStorageUri = resolveSubtitleStorageSourceUri(request)
                     subtitleStorageSourceUri = resolvedStorageUri
                     mediaKey = resolvedStorageUri?.toString() ?: videoUri.toString()
-                    val resumePositionMs = playbackProgressRepository.getResumePosition(mediaKey)
+                    val resumePositionMs = resumePositionOverride
+                        ?: playbackProgressRepository.getResumePosition(mediaKey)
                     val localSubtitles = listLocalExternalSubtitles()
                     val preferredSubtitle = preferredExternalSubtitle(localSubtitles)
                     val player = createPlayer(request, resumePositionMs, preferredSubtitle)
@@ -128,6 +169,7 @@ class PlayerViewModel(
                         activeExternalSubtitleName = preferredSubtitle?.name,
                         externalSubtitleEnabled = preferredSubtitle != null
                     )
+                    Log.i(TAG, "播放项加载完成，title=$title")
                 }
                 .onFailure { error ->
                     _uiState.value = PlayerUiState(
@@ -135,11 +177,13 @@ class PlayerViewModel(
                         externalSubtitleStyle = externalSubtitleStyleSettings(),
                         errorMessage = error.message ?: "Unable to fetch playback address"
                     )
+                    Log.i(TAG, "播放项加载失败：${error.message}")
                 }
         }
     }
 
     private fun createPlayer(request: PlaybackRequest, resumePositionMs: Long, subtitle: LocalSubtitleFile? = null): ExoPlayer {
+        val itemMediaKey = mediaKey
         val userAgent = request.userAgent ?: DEFAULT_USER_AGENT
         val headers = buildMap {
             putAll(request.headers)
@@ -174,17 +218,20 @@ class PlayerViewModel(
                 addListener(
                     object : Player.Listener {
                         override fun onIsPlayingChanged(isPlaying: Boolean) {
-                            if (!isPlaying) saveProgress(this@apply)
+                            if (!isPlaying) saveProgress(this@apply, itemMediaKey)
                         }
 
                         override fun onPlaybackStateChanged(playbackState: Int) {
                             when (playbackState) {
-                                Player.STATE_ENDED -> clearProgress()
+                                Player.STATE_ENDED -> {
+                                    clearProgress(itemMediaKey)
+                                    advanceToNextQueueItem()
+                                }
                             }
                         }
 
                         override fun onPlayerError(error: PlaybackException) {
-                            saveProgress(this@apply)
+                            saveProgress(this@apply, itemMediaKey)
                             if (error.isHttp403() && request.pickcode != null && !retriedAfterForbidden) {
                                 retryAfterForbidden(request.pickcode)
                                 return
@@ -195,8 +242,52 @@ class PlayerViewModel(
                         }
                     }
                 )
-                startProgressSaver(this)
+                startProgressSaver(this, itemMediaKey)
             }
+    }
+
+    /*
+     * ================================================================================
+     * 步骤3：切换随机队列下一项
+     * ================================================================================
+     * 目标：当前视频结束后自动播放已经洗牌的下一部视频。
+     * 数据源：内存中的逻辑播放队列和当前播放索引。
+     * 操作：
+     * 1) 释放上一部播放器并保存其播放状态。
+     * 2) 切换到下一项，重置字幕和直链重试状态。
+     * 3) 延迟解析下一项直链，避免提前请求过期地址。
+     */
+    private fun advanceToNextQueueItem() {
+        if (currentQueueIndex >= playbackQueue.lastIndex || isAdvancingQueue) return
+        isAdvancingQueue = true
+        viewModelScope.launch {
+            try {
+                Log.i(TAG, "开始切换随机播放下一项，currentIndex=$currentQueueIndex")
+                val previousPlayer = _uiState.value.player
+                val previousMediaKey = mediaKey
+                previousPlayer?.let { persistProgress(it, previousMediaKey, force = true) }
+                progressJob?.cancel()
+                previousPlayer?.release()
+
+                currentQueueIndex += 1
+                val nextItem = playbackQueue[currentQueueIndex]
+                videoUri = Uri.parse(nextItem.mediaUri)
+                title = nextItem.title.ifBlank { "Movie" }
+                fileName = nextItem.fileName
+                mediaKey = videoUri.toString()
+                subtitleStorageSourceUri = null
+                retriedAfterForbidden = false
+                lastPersistedPositionMs = Long.MIN_VALUE
+                lastPersistedDurationMs = 0L
+                lastPersistedAtMs = 0L
+                stopLiveSubtitleRecognition()
+                _uiState.update { it.copy(player = null, isLoading = true, errorMessage = null) }
+                loadCurrentQueueItem()
+                Log.i(TAG, "随机播放下一项已排入加载，index=$currentQueueIndex")
+            } finally {
+                isAdvancingQueue = false
+            }
+        }
     }
 
     private fun createMediaItem(request: PlaybackRequest, subtitle: LocalSubtitleFile?): MediaItem {
@@ -228,7 +319,8 @@ class PlayerViewModel(
             val previousPlayer = _uiState.value.player
             val resumePositionMs = previousPlayer?.currentPosition?.coerceAtLeast(0L)
                 ?: playbackProgressRepository.getResumePosition(mediaKey)
-            previousPlayer?.let { persistProgress(it, force = true) }
+            val previousMediaKey = mediaKey
+            previousPlayer?.let { persistProgress(it, previousMediaKey, force = true) }
             progressJob?.cancel()
             previousPlayer?.release()
             _uiState.value = _uiState.value.copy(player = null, isLoading = true, errorMessage = null)
@@ -276,7 +368,7 @@ class PlayerViewModel(
     fun togglePlayPause() {
         uiState.value.player?.let { player ->
             if (player.isPlaying) {
-                saveProgress(player)
+                saveProgress(player, mediaKey)
                 player.pause()
             } else {
                 player.play()
@@ -287,7 +379,7 @@ class PlayerViewModel(
     fun leavePlayer() {
         val player = uiState.value.player
         if (player != null) {
-            saveProgress(player)
+            saveProgress(player, mediaKey)
             player.pause()
         }
         stopLiveSubtitleRecognition()
@@ -296,21 +388,21 @@ class PlayerViewModel(
     fun seekBack() {
         uiState.value.player?.let { player ->
             player.seekBack()
-            saveProgress(player)
+            saveProgress(player, mediaKey)
         }
     }
 
     fun seekForward() {
         uiState.value.player?.let { player ->
             player.seekForward()
-            saveProgress(player)
+            saveProgress(player, mediaKey)
         }
     }
 
     fun seekTo(positionMs: Long) {
         uiState.value.player?.let { player ->
             player.seekTo(positionMs.coerceAtLeast(0L))
-            saveProgress(player)
+            saveProgress(player, mediaKey)
         }
     }
 
@@ -1049,27 +1141,28 @@ class PlayerViewModel(
         }
     }
 
-    private fun startProgressSaver(player: Player) {
+    private fun startProgressSaver(player: Player, itemMediaKey: String) {
         progressJob?.cancel()
         progressJob = viewModelScope.launch {
             while (isActive) {
                 delay(PROGRESS_SAVE_INTERVAL_MS)
-                persistProgress(player, force = false)
+                persistProgress(player, itemMediaKey, force = false)
             }
         }
     }
 
-    private fun saveProgress(player: Player) {
+    private fun saveProgress(player: Player, itemMediaKey: String) {
         val playbackState = player.playbackState
         val positionMs = player.currentPosition.coerceAtLeast(0L)
         val durationMs = player.duration.takeIf { it > 0L } ?: 0L
         progressPersistenceScope.launch {
-            persistProgressValues(playbackState, positionMs, durationMs, force = true)
+            persistProgressValues(itemMediaKey, playbackState, positionMs, durationMs, force = true)
         }
     }
 
-    private suspend fun persistProgress(player: Player, force: Boolean) {
+    private suspend fun persistProgress(player: Player, itemMediaKey: String, force: Boolean) {
         persistProgressValues(
+            itemMediaKey = itemMediaKey,
             playbackState = player.playbackState,
             positionMs = player.currentPosition.coerceAtLeast(0L),
             durationMs = player.duration.takeIf { it > 0L } ?: 0L,
@@ -1078,16 +1171,19 @@ class PlayerViewModel(
     }
 
     private suspend fun persistProgressValues(
+        itemMediaKey: String,
         playbackState: Int,
         positionMs: Long,
         durationMs: Long,
         force: Boolean
     ) {
         if (playbackState == Player.STATE_ENDED) {
-            playbackProgressRepository.clear(mediaKey)
-            lastPersistedPositionMs = Long.MIN_VALUE
-            lastPersistedDurationMs = 0L
-            lastPersistedAtMs = 0L
+            playbackProgressRepository.clear(itemMediaKey)
+            if (mediaKey == itemMediaKey) {
+                lastPersistedPositionMs = Long.MIN_VALUE
+                lastPersistedDurationMs = 0L
+                lastPersistedAtMs = 0L
+            }
             return
         }
         val now = System.currentTimeMillis()
@@ -1099,21 +1195,25 @@ class PlayerViewModel(
             if (positionDelta < PROGRESS_SAVE_POSITION_DELTA_MS && durationStable && intervalNotReached) return
         }
         playbackProgressRepository.save(
-            mediaKey = mediaKey,
+            mediaKey = itemMediaKey,
             positionMs = positionMs,
             durationMs = durationMs
         )
-        lastPersistedPositionMs = positionMs
-        lastPersistedDurationMs = durationMs
-        lastPersistedAtMs = now
+        if (mediaKey == itemMediaKey) {
+            lastPersistedPositionMs = positionMs
+            lastPersistedDurationMs = durationMs
+            lastPersistedAtMs = now
+        }
     }
 
-    private fun clearProgress() {
+    private fun clearProgress(itemMediaKey: String) {
         progressPersistenceScope.launch {
-            playbackProgressRepository.clear(mediaKey)
-            lastPersistedPositionMs = Long.MIN_VALUE
-            lastPersistedDurationMs = 0L
-            lastPersistedAtMs = 0L
+            playbackProgressRepository.clear(itemMediaKey)
+            if (mediaKey == itemMediaKey) {
+                lastPersistedPositionMs = Long.MIN_VALUE
+                lastPersistedDurationMs = 0L
+                lastPersistedAtMs = 0L
+            }
         }
     }
 
@@ -1129,6 +1229,7 @@ class PlayerViewModel(
     }
 
     companion object {
+        private const val TAG = "PlayerViewModel"
         private const val LIVE_TRANSLATE_MIN_INTERVAL_MS = 1_200L
         private const val LIVE_SUBTITLE_VISIBLE_MS = 4_000L
         private const val PROGRESS_SAVE_INTERVAL_MS = 15_000L
@@ -1143,7 +1244,8 @@ class PlayerViewModel(
             directLinkRepository: DirectLinkRepository,
             cloudStrmRecordRepository: CloudStrmRecordRepository,
             settingsRepository: AppSettingsRepository,
-            playbackProgressRepository: PlaybackProgressRepository
+            playbackProgressRepository: PlaybackProgressRepository,
+            queueItems: List<PlaybackQueueItem> = emptyList()
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
@@ -1156,7 +1258,8 @@ class PlayerViewModel(
                         directLinkRepository = directLinkRepository,
                         cloudStrmRecordRepository = cloudStrmRecordRepository,
                         settingsRepository = settingsRepository,
-                        playbackProgressRepository = playbackProgressRepository
+                        playbackProgressRepository = playbackProgressRepository,
+                        queueItems = queueItems
                     ) as T
             }
     }

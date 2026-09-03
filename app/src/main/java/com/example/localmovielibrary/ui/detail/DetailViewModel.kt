@@ -43,6 +43,11 @@ class DetailViewModel(
     val movie: StateFlow<MovieEntity?> = repository.observeMovie(movieId)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
+    val actorAvatarRefreshVersion: StateFlow<Int> = scrapeRepository.actorAvatarUpdateState
+        .map { state -> state.refreshVersion }
+        .distinctUntilChanged()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+
     private val _isScraping = MutableStateFlow(false)
     val isScraping: StateFlow<Boolean> = _isScraping
 
@@ -149,6 +154,10 @@ class DetailViewModel(
         }
     }
 
+    fun scrapeWithDefault() {
+        scrapeCurrent(scrapeRepository.getDefaultScrapeSource(), allowCookieRefresh = true)
+    }
+
     fun scrapeWithDmm() {
         scrapeCurrent(ScrapeSource.Dmm, allowCookieRefresh = false)
     }
@@ -163,6 +172,14 @@ class DetailViewModel(
 
     fun scrapeWithJavbus() {
         scrapeCurrent(ScrapeSource.Javbus, allowCookieRefresh = false)
+    }
+
+    fun scrapeWithJavdb() {
+        scrapeCurrent(ScrapeSource.Javdb, allowCookieRefresh = false)
+    }
+
+    fun scrapeWithJavlibrary() {
+        scrapeCurrent(ScrapeSource.Javlibrary, allowCookieRefresh = false)
     }
 
     fun scrapeWithMissav() {
@@ -187,6 +204,14 @@ class DetailViewModel(
 
     fun rescrapeWithJavbus() {
         rescrapeCurrent(ScrapeSource.Javbus, allowCookieRefresh = false)
+    }
+
+    fun rescrapeWithJavdb() {
+        rescrapeCurrent(ScrapeSource.Javdb, allowCookieRefresh = false)
+    }
+
+    fun rescrapeWithJavlibrary() {
+        rescrapeCurrent(ScrapeSource.Javlibrary, allowCookieRefresh = false)
     }
 
     fun rescrapeWithMissav() {
@@ -417,6 +442,8 @@ private val ScrapeSource.displayName: String
         ScrapeSource.Dmm2 -> "DMM2"
         ScrapeSource.Official -> "Official"
         ScrapeSource.Javbus -> "JavBus"
+        ScrapeSource.Javdb -> "JavDB"
+        ScrapeSource.Javlibrary -> "JavLibrary"
         ScrapeSource.Missav -> "MissAV"
     }
 

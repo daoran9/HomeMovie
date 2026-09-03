@@ -114,6 +114,7 @@ fun DetailScreen(
     val isScraping by viewModel.isScraping.collectAsStateWithLifecycle()
     val similarMovies by viewModel.similarMovies.collectAsStateWithLifecycle()
     val playbackParts by viewModel.playbackParts.collectAsStateWithLifecycle()
+    val actorAvatarRefreshVersion by viewModel.actorAvatarRefreshVersion.collectAsStateWithLifecycle()
     val thumbBackgroundSettings by viewModel.thumbBackgroundSettings.collectAsStateWithLifecycle()
     val hiddenMissavRequest by viewModel.hiddenMissavRequest.collectAsStateWithLifecycle()
     val snackbarHostState = remember { SnackbarHostState() }
@@ -173,6 +174,7 @@ fun DetailScreen(
                     movie = it,
                     onBack = onBack,
                     playbackParts = playbackParts,
+                    actorAvatarRefreshVersion = actorAvatarRefreshVersion,
                     onPlay = { part -> onPlay(part.videoUri, it.title, part.fileName) },
                     onToggleFavorite = viewModel::toggleFavorite,
                     onToggleWatched = viewModel::toggleWatched,
@@ -185,16 +187,21 @@ fun DetailScreen(
                         viewModel.menuFeedback("Showing parsed NFO fields")
                     },
                     onRefresh = viewModel::refreshMovie,
+                    onScrapeDefault = viewModel::scrapeWithDefault,
                     onScrapeDmm = viewModel::scrapeWithDmm,
                     onScrapeDmm2 = viewModel::scrapeWithDmm2,
                     onScrapeOfficial = viewModel::scrapeWithOfficial,
                     onScrapeJavbus = viewModel::scrapeWithJavbus,
+                    onScrapeJavdb = viewModel::scrapeWithJavdb,
+                    onScrapeJavlibrary = viewModel::scrapeWithJavlibrary,
                     onScrapeMissav = viewModel::scrapeWithMissav,
                     onRescrapeDefault = viewModel::rescrapeWithDefault,
                     onRescrapeDmm = viewModel::rescrapeWithDmm,
                     onRescrapeDmm2 = viewModel::rescrapeWithDmm2,
                     onRescrapeOfficial = viewModel::rescrapeWithOfficial,
                     onRescrapeJavbus = viewModel::rescrapeWithJavbus,
+                    onRescrapeJavdb = viewModel::rescrapeWithJavdb,
+                    onRescrapeJavlibrary = viewModel::rescrapeWithJavlibrary,
                     onRescrapeMissav = viewModel::rescrapeWithMissav,
                     onClearScrapeRequest = { showClearScrapeConfirm = true },
                     thumbBackgroundSettings = thumbBackgroundSettings,
@@ -265,22 +272,28 @@ fun MovieDetailScreen(
     movie: MovieEntity,
     onBack: () -> Unit,
     playbackParts: List<MoviePlaybackPart>,
+    actorAvatarRefreshVersion: Int,
     onPlay: (MoviePlaybackPart) -> Unit,
     onToggleFavorite: () -> Unit,
     onToggleWatched: () -> Unit,
     onShowPaths: () -> Unit,
     onShowNfo: () -> Unit,
     onRefresh: () -> Unit,
+    onScrapeDefault: () -> Unit,
     onScrapeDmm: () -> Unit,
     onScrapeDmm2: () -> Unit,
     onScrapeOfficial: () -> Unit,
     onScrapeJavbus: () -> Unit,
+    onScrapeJavdb: () -> Unit,
+    onScrapeJavlibrary: () -> Unit,
     onScrapeMissav: () -> Unit,
     onRescrapeDefault: () -> Unit,
     onRescrapeDmm: () -> Unit,
     onRescrapeDmm2: () -> Unit,
     onRescrapeOfficial: () -> Unit,
     onRescrapeJavbus: () -> Unit,
+    onRescrapeJavdb: () -> Unit,
+    onRescrapeJavlibrary: () -> Unit,
     onRescrapeMissav: () -> Unit,
     onClearScrapeRequest: () -> Unit,
     thumbBackgroundSettings: ThumbBackgroundSettings,
@@ -298,7 +311,7 @@ fun MovieDetailScreen(
             .background(DetailBackground)
     ) {
         if (thumbBackgroundSettings.enabled && movie.thumbUri != null) {
-            DetailThumbBackground(movie.thumbUri, thumbBackgroundSettings)
+            DetailThumbBackground(movie.thumbUri, thumbBackgroundSettings, movie.updatedAt)
         }
         IconButton(
             modifier = Modifier
@@ -338,22 +351,31 @@ fun MovieDetailScreen(
                     onDeleteRequest = onDeleteRequest,
                     onShowNfo = onShowNfo,
                     onRefresh = onRefresh,
+                    onScrapeDefault = onScrapeDefault,
                     onScrapeDmm = onScrapeDmm,
                     onScrapeDmm2 = onScrapeDmm2,
                     onScrapeOfficial = onScrapeOfficial,
                     onScrapeJavbus = onScrapeJavbus,
+                    onScrapeJavdb = onScrapeJavdb,
+                    onScrapeJavlibrary = onScrapeJavlibrary,
                     onScrapeMissav = onScrapeMissav,
                     onRescrapeDefault = onRescrapeDefault,
                     onRescrapeDmm = onRescrapeDmm,
                     onRescrapeDmm2 = onRescrapeDmm2,
                     onRescrapeOfficial = onRescrapeOfficial,
                     onRescrapeJavbus = onRescrapeJavbus,
+                    onRescrapeJavdb = onRescrapeJavdb,
+                    onRescrapeJavlibrary = onRescrapeJavlibrary,
                     onRescrapeMissav = onRescrapeMissav,
                     onClearScrapeRequest = onClearScrapeRequest,
                     onThumbBackgroundSettingsRequest = onThumbBackgroundSettingsRequest
                 )
                 ReleaseAndOverview(movie = movie, onTagClick = onTagClick)
-                CastSection(actors = movie.actors, onActorClick = onActorClick)
+                CastSection(
+                    actors = movie.actors,
+                    refreshVersion = actorAvatarRefreshVersion,
+                    onActorClick = onActorClick
+                )
                 CollectionSection(movie)
                 SimilarSection(movies = similarMovies, onMovieClick = onSimilarClick)
                 OtherInfoSection(movie = movie, onGenreClick = onGenreClick, onTagClick = onTagClick)
@@ -365,7 +387,8 @@ fun MovieDetailScreen(
 @Composable
 private fun DetailThumbBackground(
     thumbUri: String,
-    settings: ThumbBackgroundSettings
+    settings: ThumbBackgroundSettings,
+    refreshVersion: Long
 ) {
     val overlayAlpha = (1f - settings.alphaPercent / 100f).coerceIn(0.08f, 0.95f)
     UriImage(
@@ -373,7 +396,8 @@ private fun DetailThumbBackground(
         modifier = Modifier.fillMaxSize(),
         contentScale = ContentScale.Crop,
         alignment = Alignment.Center,
-        maxDecodeSize = 1400
+        maxDecodeSize = 1400,
+        refreshVersion = refreshVersion
     )
     Box(
         modifier = Modifier
@@ -395,8 +419,9 @@ private fun MobileHeroImage(movie: MovieEntity) {
             uri = backdropUri,
             modifier = Modifier
                 .fillMaxSize()
-                .then(if (movie.fanartUri == null) Modifier.blur(8.dp) else Modifier),
-            contentScale = ContentScale.Crop
+            .then(if (movie.fanartUri == null) Modifier.blur(8.dp) else Modifier),
+            contentScale = ContentScale.Crop,
+            refreshVersion = movie.updatedAt
         )
         Box(
             modifier = Modifier
@@ -554,16 +579,21 @@ private fun MobileActionBar(
     onDeleteRequest: () -> Unit,
     onShowNfo: () -> Unit,
     onRefresh: () -> Unit,
+    onScrapeDefault: () -> Unit,
     onScrapeDmm: () -> Unit,
     onScrapeDmm2: () -> Unit,
     onScrapeOfficial: () -> Unit,
     onScrapeJavbus: () -> Unit,
+    onScrapeJavdb: () -> Unit,
+    onScrapeJavlibrary: () -> Unit,
     onScrapeMissav: () -> Unit,
     onRescrapeDefault: () -> Unit,
     onRescrapeDmm: () -> Unit,
     onRescrapeDmm2: () -> Unit,
     onRescrapeOfficial: () -> Unit,
     onRescrapeJavbus: () -> Unit,
+    onRescrapeJavdb: () -> Unit,
+    onRescrapeJavlibrary: () -> Unit,
     onRescrapeMissav: () -> Unit,
     onClearScrapeRequest: () -> Unit,
     onThumbBackgroundSettingsRequest: () -> Unit
@@ -611,82 +641,19 @@ private fun MobileActionBar(
                 )
                 if (canScrape) {
                     DropdownMenuItem(
-                        text = { Text("从 DMM 刮削") },
+                        text = { Text("多源融合刮削") },
                         onClick = {
                             moreExpanded = false
-                            onScrapeDmm()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("从 DMM2 刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onScrapeDmm2()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("从 Official 刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onScrapeOfficial()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("从 JavBus 刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onScrapeJavbus()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("从 MissAV 刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onScrapeMissav()
+                            onScrapeDefault()
                         }
                     )
                 }
                 if (canRescrape) {
                     DropdownMenuItem(
-                        text = { Text("重新刮削（默认方式）") },
+                        text = { Text("多源融合重新刮削") },
                         onClick = {
                             moreExpanded = false
                             onRescrapeDefault()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("用 DMM 重新刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onRescrapeDmm()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("用 DMM2 重新刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onRescrapeDmm2()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("用 Official 重新刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onRescrapeOfficial()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("用 JavBus 重新刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onRescrapeJavbus()
-                        }
-                    )
-                    DropdownMenuItem(
-                        text = { Text("用 MissAV 重新刮削") },
-                        onClick = {
-                            moreExpanded = false
-                            onRescrapeMissav()
                         }
                     )
                 }
@@ -825,10 +792,10 @@ private fun ReleaseAndOverview(movie: MovieEntity, onTagClick: (String) -> Unit)
 }
 
 @Composable
-fun CastSection(actors: List<String>, onActorClick: (String) -> Unit) {
+fun CastSection(actors: List<String>, refreshVersion: Int, onActorClick: (String) -> Unit) {
     if (actors.isEmpty()) return
     val context = LocalContext.current
-    val avatarStore = remember(context) { ActorAvatarStore(context) }
+    val avatarStore = remember(context, refreshVersion) { ActorAvatarStore(context) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         DetailSectionTitle("演职人员")
         Row(
@@ -841,6 +808,7 @@ fun CastSection(actors: List<String>, onActorClick: (String) -> Unit) {
                 CastCard(
                     name = actor,
                     avatarUri = avatarStore.avatarUri(actor),
+                    refreshVersion = refreshVersion,
                     onClick = { onActorClick(actor) }
                 )
             }
@@ -849,7 +817,7 @@ fun CastSection(actors: List<String>, onActorClick: (String) -> Unit) {
 }
 
 @Composable
-private fun CastCard(name: String, avatarUri: String?, onClick: () -> Unit) {
+private fun CastCard(name: String, avatarUri: String?, refreshVersion: Int, onClick: () -> Unit) {
     Column(
         modifier = Modifier
             .width(82.dp)
@@ -869,7 +837,8 @@ private fun CastCard(name: String, avatarUri: String?, onClick: () -> Unit) {
                     uri = avatarUri,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Crop,
-                    maxDecodeSize = 320
+                    maxDecodeSize = 320,
+                    refreshVersion = refreshVersion.toLong()
                 )
             } else {
                 Icon(Icons.Rounded.Person, contentDescription = null, tint = Color.White, modifier = Modifier.size(34.dp))
@@ -902,6 +871,7 @@ private fun CollectionSection(movie: MovieEntity) {
         ) {
             SmallPosterCard(
                 imageUri = movie.posterUri ?: movie.thumbUri,
+                imageRefreshVersion = movie.updatedAt,
                 title = collectionLabel,
                 subtitle = movie.title
             )
@@ -921,6 +891,7 @@ private fun SimilarSection(movies: List<MovieEntity>, onMovieClick: (Long) -> Un
             movies.forEach { movie ->
                 SmallPosterCard(
                     imageUri = movie.posterUri ?: movie.thumbUri,
+                    imageRefreshVersion = movie.updatedAt,
                     title = movie.title,
                     subtitle = movie.year?.toString().orEmpty(),
                     onClick = { onMovieClick(movie.id) }
@@ -933,6 +904,7 @@ private fun SimilarSection(movies: List<MovieEntity>, onMovieClick: (Long) -> Un
 @Composable
 private fun SmallPosterCard(
     imageUri: String?,
+    imageRefreshVersion: Long,
     title: String,
     subtitle: String,
     onClick: (() -> Unit)? = null
@@ -955,7 +927,8 @@ private fun SmallPosterCard(
                 uri = imageUri,
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Crop,
-                maxDecodeSize = 520
+                maxDecodeSize = 520,
+                refreshVersion = imageRefreshVersion
             )
             if (imageUri == null) {
                 Icon(Icons.Rounded.Movie, contentDescription = null, tint = Color.White.copy(alpha = 0.76f))

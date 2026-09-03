@@ -1,6 +1,7 @@
 ﻿package com.example.localmovielibrary.ui.cloud
 
 import android.net.Uri
+import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
@@ -9,6 +10,7 @@ import com.example.localmovielibrary.data.repository.AppSettingsRepository
 import com.example.localmovielibrary.data.repository.Cloud115StrmRepository
 import com.example.localmovielibrary.data.repository.CloudStrmRecordRepository
 import com.example.localmovielibrary.data.repository.DomesticMovieRepository
+import com.example.localmovielibrary.data.repository.GeneratedStrmFile
 import com.example.localmovielibrary.data.repository.MovieRepository
 import com.example.localmovielibrary.data.repository.StrmScrapeRepository
 import com.example.localmovielibrary.scraper.MissavCookieRequiredException
@@ -17,14 +19,19 @@ import com.example.localmovielibrary.scraper.ScrapeSource
 import com.example.localmovielibrary.ui.shared.HiddenMissavWebRequest
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 class CloudBrowserViewModel(
@@ -44,6 +51,8 @@ class CloudBrowserViewModel(
     private val missavWebViewQueue = ArrayDeque<PendingMissavScrape>()
     private val missavCloudAddQueue = ArrayDeque<PendingCloudAdd>()
     private var isMissavCloudAddRunning = false
+    private var randomPlaybackJob: Job? = null
+    private var folderLibraryAddJob: Job? = null
 
     init {
         loadCurrent()
@@ -74,6 +83,322 @@ class CloudBrowserViewModel(
 
     fun refresh() {
         loadCurrent()
+    }
+
+    /*
+     * ================================================================================
+     * 步骤2：准备文件夹随机播放
+     * ================================================================================
+     * 目标：把当前 115 文件夹及其子目录的视频洗牌后交给播放器。
+     * 数据源：当前目录 CID 和递归目录读取结果。
+     * 操作：
+     * 1) 在 IO 协程中递归读取视频，避免阻塞 Compose 页面。
+     * 2) 只把 pickcode 和文件名传给播放器，每次播放时再解析直链。
+     * 3) 用一次性状态事件通知页面导航，空目录和失败都给出可见提示。
+     */
+    fun playRandomFolder() {
+        if (_uiState.value.isRandomPlaybackLoading) return
+        val folder = backStack.lastOrNull() ?: return
+        randomPlaybackJob?.cancel()
+        randomPlaybackJob = viewModelScope.launch {
+            Log.i(TAG, "开始准备文件夹随机播放，cid=${folder.cid}")
+            _uiState.update {
+                it.copy(
+                    isRandomPlaybackLoading = true,
+                    message = progressMessage("正在读取文件夹视频...")
+                )
+            }
+            runCatching {
+                strmRepository.listVideoFilesRecursively(folder.cid)
+                    .asSequence()
+                    .filter { it.pickcode?.isNotBlank() == true }
+                    .distinctBy { it.pickcode }
+                    .toList()
+                    .shuffled()
+            }.onSuccess { items ->
+                Log.i(TAG, "文件夹随机播放队列准备完成，视频数=${items.size}")
+                _uiState.update { state ->
+                    state.copy(
+                        isRandomPlaybackLoading = false,
+                        randomPlaybackItems = items.takeIf { it.isNotEmpty() },
+                        message = if (items.isEmpty()) {
+                            progressMessage("当前文件夹及子文件夹没有可播放视频")
+                        } else {
+                            progressMessage("已随机准备 ${items.size} 部视频")
+                        }
+                    )
+                }
+            }.onFailure { error ->
+                Log.i(TAG, "文件夹随机播放队列准备失败：${error.message}")
+                _uiState.update {
+                    it.copy(
+                        isRandomPlaybackLoading = false,
+                        message = progressMessage(error.message ?: "读取文件夹视频失败")
+                    )
+                }
+            }
+        }
+    }
+
+    fun consumeRandomPlaybackItems(): List<Cloud115FileItem>? {
+        val items = _uiState.value.randomPlaybackItems ?: return null
+        _uiState.update { it.copy(randomPlaybackItems = null) }
+        return items
+    }
+
+    /*
+     * ================================================================================
+     * 步骤3：批量添加115文件夹到媒体库
+     * ================================================================================
+     * 目标：把选中的115文件夹及子文件夹视频批量转成 STRM、入库并刮削。
+     * 数据源：115递归目录扫描结果、媒体库目录和 STRM 保存位置。
+     * 操作：
+     * 1) 先检查两个本地目录配置，避免扫描完成后才发现无法写入。
+     * 2) 按 pickcode 去重，逐个串行处理，控制115请求和刮削压力。
+     * 3) 单个视频失败只记录并继续，保留批量任务的整体进度。
+     */
+    fun addFolderToLibrary(item: Cloud115FileItem) {
+        val folderCid = item.cid ?: return
+        if (!item.isDirectory) return
+        if (folderCid in _uiState.value.addingFolderCids) {
+            _uiState.update { it.copy(message = progressMessage("这个文件夹正在添加")) }
+            return
+        }
+        if (settingsRepository.getLibraryRootUri().isNullOrBlank()) {
+            _uiState.update { it.copy(message = progressMessage("请先到设置页选择影片库目录")) }
+            return
+        }
+        if (settingsRepository.getStrmTreeUri().isNullOrBlank()) {
+            _uiState.update { it.copy(message = progressMessage("请先到设置页选择 STRM 保存目录")) }
+            return
+        }
+        if (settingsRepository.getDefaultScrapeSource() == ScrapeSource.Missav) {
+            _uiState.update {
+                it.copy(message = progressMessage("MissAV 刮削需要逐部网页验证，暂不支持整目录批量入库"))
+            }
+            return
+        }
+        if (_uiState.value.addingFolderCids.isNotEmpty()) {
+            _uiState.update { it.copy(message = progressMessage("已有整目录入库任务正在处理")) }
+            return
+        }
+
+        folderLibraryAddJob = viewModelScope.launch {
+            _uiState.update {
+                it.copy(
+                    addingFolderCids = it.addingFolderCids + folderCid,
+                    folderBatchProgress = FolderBatchProgress(folderName = item.name),
+                    message = progressMessage("正在扫描整目录：${item.name}")
+                )
+            }
+            var successCount = 0
+            var skippedCount = 0
+            var failedCount = 0
+            var totalCount = 0
+            try {
+                /*
+                 * ================================================================================
+                 * 步骤4：扫描并建立批量候选集
+                 * ================================================================================
+                 * 目标：只把支持的视频交给后续入库步骤。
+                 * 数据源：当前115文件夹及其子文件夹。
+                 * 操作：
+                 * 1) 递归读取目录，保留已扫到的部分结果。
+                 * 2) 按 pickcode 去重，避免同一文件重复生成 STRM。
+                 */
+                val candidates = strmRepository.listVideoFilesRecursively(folderCid)
+                    .asSequence()
+                    .filter { it.pickcode?.isNotBlank() == true }
+                    .distinctBy { it.pickcode }
+                    .toList()
+                totalCount = candidates.size
+                _uiState.update {
+                    it.copy(
+                        folderBatchProgress = FolderBatchProgress(
+                            folderName = item.name,
+                            total = totalCount
+                        ),
+                        message = progressMessage("已扫描 $totalCount 部，开始批量入库")
+                    )
+                }
+
+                /*
+                 * ================================================================================
+                 * 步骤5：批量生成 STRM
+                 * ================================================================================
+                 * 目标：先完成本地 STRM 写入，再把网络刮削从 115 写入链路中拆出。
+                 * 数据源：批量候选视频和已有 CloudStrmRecord。
+                 * 操作：
+                 * 1) 已存在的 pickcode 直接跳过。
+                 * 2) 同番号标准片冲突直接跳过，避免批量任务替用户替换影片。
+                 * 3) 只生成 STRM，待后续阶段并发刮削。
+                 */
+                val preparedScrapes = mutableListOf<PreparedCloudAdd>()
+                for ((index, candidate) in candidates.withIndex()) {
+                    ensureActive()
+                    val pickcode = candidate.pickcode.orEmpty()
+                    _uiState.update {
+                        it.copy(
+                            folderBatchProgress = FolderBatchProgress(
+                                folderName = item.name,
+                                current = index + 1,
+                                total = totalCount,
+                                success = successCount,
+                                skipped = skippedCount,
+                                failed = failedCount,
+                                currentFileName = candidate.name
+                            ),
+                            message = progressMessage("正在生成 STRM ${index + 1}/$totalCount：${candidate.name}")
+                        )
+                    }
+                    try {
+                        if (recordRepository.isFinalizedInLibrary(
+                                pickcode = pickcode,
+                                libraryRootUri = settingsRepository.getLibraryRootUri().orEmpty()
+                            )
+                        ) {
+                            skippedCount += 1
+                            scrapeRepository.appendLog("整目录入库跳过已存在 pickcode：${candidate.name}")
+                            continue
+                        }
+                        if (recordRepository.findStandardSameNumberCandidate(candidate.name, pickcode) != null) {
+                            skippedCount += 1
+                            scrapeRepository.appendLog("整目录入库跳过同番号冲突：${candidate.name}")
+                            continue
+                        }
+                        val generated = withContext(Dispatchers.IO) {
+                            withAddLock(candidate.name) {
+                                strmRepository.generateStrmForVideo(candidate, forceDistinct = false)
+                            }
+                        }
+                        if (!generated.shouldScrape) {
+                            successCount += 1
+                            _uiState.update { state ->
+                                state.copy(addedPickcodes = state.addedPickcodes + pickcode)
+                            }
+                            scrapeRepository.appendLog("整目录入库完成（附加播放源）：${candidate.name}")
+                        } else {
+                            preparedScrapes += PreparedCloudAdd(
+                                item = candidate,
+                                pickcode = pickcode,
+                                generated = generated
+                            )
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        failedCount += 1
+                        val message = error.message ?: error::class.java.simpleName
+                        scrapeRepository.appendLog("整目录入库失败：${candidate.name}，原因：$message")
+                    }
+                }
+
+                /*
+                 * ================================================================================
+                 * 步骤6：并发刮削并整理影片库
+                 * ================================================================================
+                 * 目标：让刮削网络请求重叠执行，缩短整目录入库时间。
+                 * 数据源：步骤5生成的 STRM 和刮削并发设置。
+                 * 操作：
+                 * 1) 只限制刮削阶段并发，不放大 115 目录扫描请求。
+                 * 2) 每个番号仍使用独立锁，避免同番号文件互相覆盖。
+                 * 3) 单个任务失败只计数并继续，全部完成后统一汇总。
+                 */
+                if (preparedScrapes.isNotEmpty()) {
+                    val scrapeConcurrency = settingsRepository.getScrapeConcurrencyLimit().coerceIn(1, 4)
+                    val progressMutex = Mutex()
+                    var completedCount = totalCount - preparedScrapes.size
+                    val scrapeSemaphore = Semaphore(scrapeConcurrency)
+                    coroutineScope {
+                        preparedScrapes.map { prepared ->
+                            async(Dispatchers.IO) {
+                                scrapeSemaphore.withPermit {
+                                    ensureActive()
+                                    try {
+                                        withAddLock(prepared.item.name) {
+                                            processGeneratedCloudVideoAdd(
+                                                item = prepared.item,
+                                                pickcode = prepared.pickcode,
+                                                generated = prepared.generated
+                                            )
+                                        }
+                                        progressMutex.withLock {
+                                            successCount += 1
+                                            completedCount += 1
+                                            _uiState.update { state ->
+                                                state.copy(
+                                                    addedPickcodes = state.addedPickcodes + prepared.pickcode,
+                                                    folderBatchProgress = FolderBatchProgress(
+                                                        folderName = item.name,
+                                                        current = completedCount,
+                                                        total = totalCount,
+                                                        success = successCount,
+                                                        skipped = skippedCount,
+                                                        failed = failedCount,
+                                                        currentFileName = prepared.item.name
+                                                    ),
+                                                    message = progressMessage("正在刮削 $completedCount/$totalCount：${prepared.item.name}")
+                                                )
+                                            }
+                                        }
+                                    } catch (error: CancellationException) {
+                                        throw error
+                                    } catch (error: Throwable) {
+                                        val message = error.message ?: error::class.java.simpleName
+                                        progressMutex.withLock {
+                                            failedCount += 1
+                                            completedCount += 1
+                                            _uiState.update { state ->
+                                                state.copy(
+                                                    folderBatchProgress = FolderBatchProgress(
+                                                        folderName = item.name,
+                                                        current = completedCount,
+                                                        total = totalCount,
+                                                        success = successCount,
+                                                        skipped = skippedCount,
+                                                        failed = failedCount,
+                                                        currentFileName = prepared.item.name
+                                                    ),
+                                                    message = progressMessage("刮削失败 $completedCount/$totalCount：${prepared.item.name}")
+                                                )
+                                            }
+                                        }
+                                        scrapeRepository.appendLog("整目录刮削失败：${prepared.item.name}，原因：$message")
+                                    }
+                                }
+                            }
+                        }.awaitAll()
+                    }
+                }
+                val completedMessage = "整目录入库完成：成功 $successCount，跳过 $skippedCount，失败 $failedCount"
+                scrapeRepository.appendLog(completedMessage)
+                _uiState.update {
+                    it.copy(
+                        message = progressMessage(completedMessage),
+                        addedFolderCids = it.addedFolderCids + folderCid,
+                        folderBatchProgress = FolderBatchProgress(
+                            folderName = item.name,
+                            current = totalCount,
+                            total = totalCount,
+                            success = successCount,
+                            skipped = skippedCount,
+                            failed = failedCount
+                        )
+                    )
+                }
+            } catch (error: CancellationException) {
+                scrapeRepository.appendLog("整目录入库已取消：${item.name}")
+                throw error
+            } catch (error: Throwable) {
+                val message = error.message ?: "整目录扫描失败"
+                scrapeRepository.appendLog("整目录入库失败：${item.name}，原因：$message")
+                _uiState.update { it.copy(message = progressMessage(message)) }
+            } finally {
+                _uiState.update { state ->
+                    state.copy(addingFolderCids = state.addingFolderCids - folderCid)
+                }
+            }
+        }
     }
 
     fun scrollPositionFor(cid: Long): CloudScrollPosition =
@@ -186,20 +511,20 @@ class CloudBrowserViewModel(
             }
             runCatching {
                 settingsRepository.saveMissavCookies(cookie)
-                val movie = movieRepository.findMovieByNumberAndVariant(pending.libraryRootUri, pending.number, pending.sourceName)
-                    ?: error("没有找到刚添加的影片：${pending.number}")
-                val scrapeResult = scrapeRepository.scrapeMovieWithMissavHtmlOutput(movie, html, cookie)
-                scrapeRepository.appendLog("MissAV WebView 刮削完成，开始刷新单个影片：${pending.number}")
+                val scrapeResult = scrapeRepository.scrapeStrmUriWithMissavHtmlOutput(
+                    sourceRootUri = pending.sourceRootUri,
+                    strmUri = pending.strmUri,
+                    html = html,
+                    cookie = cookie,
+                    outputRootUri = pending.libraryRootUri
+                )
+                scrapeRepository.appendLog("MissAV WebView 刮削完成，开始扫描影片库中的整理结果：${pending.number}")
                 val refreshedMovie = movieRepository.scanSingleMovie(
                     rootUri = Uri.parse(pending.libraryRootUri),
                     videoUri = Uri.parse(scrapeResult.strmUri),
                     mergeByMovieNumber = true
                 )
                 if (refreshedMovie != null) {
-                    if (movie.id != refreshedMovie.id && movie.videoUri != refreshedMovie.videoUri) {
-                        movieRepository.deleteMovie(movie.id)
-                        scrapeRepository.appendLog("已删除 MissAV 刮削前临时入库记录：${movie.videoName}")
-                    }
                     recordRepository.updateStrmLocation(
                         pickcode = pending.pickcode,
                         strmUri = refreshedMovie.videoUri,
@@ -517,9 +842,19 @@ class CloudBrowserViewModel(
     ): CloudAddResult {
         scrapeRepository.appendLog("开始处理网盘添加队列：${item.name} / $pickcode")
         val generated = strmRepository.generateStrmForVideo(item, forceDistinct = forceDistinct)
+        return processGeneratedCloudVideoAdd(item, pickcode, generated)
+    }
+
+    private suspend fun processGeneratedCloudVideoAdd(
+        item: Cloud115FileItem,
+        pickcode: String,
+        generated: GeneratedStrmFile
+    ): CloudAddResult {
+        val strmRoot = settingsRepository.getStrmTreeUri()
+            ?: error("请先到设置页选择 STRM 保存目录")
         val libraryRoot = settingsRepository.getLibraryRootUri()
             ?: error("请先到设置页选择影片库目录")
-        val rootUri = Uri.parse(libraryRoot)
+        val libraryRootUri = Uri.parse(libraryRoot)
 
         if (!generated.shouldScrape) {
             scrapeRepository.appendLog("附加播放源 STRM 写入完成，不单独入库：${generated.fileName}")
@@ -529,45 +864,46 @@ class CloudBrowserViewModel(
             )
         }
 
-        scrapeRepository.appendLog("STRM 写入完成，开始扫描单个 STRM：${generated.fileName}")
-        val addedMovie = movieRepository.scanSingleMovie(rootUri, Uri.parse(generated.strmUri), mergeByMovieNumber = !generated.forceDistinct)
-
         val number = MovieNumberExtractor.extract(generated.fileName)
             ?: MovieNumberExtractor.extract(item.name)
             ?: error("STRM 已添加，但无法从文件名提取番号，无法自动刮削")
-        val movieForScrape = addedMovie
-            ?: movieRepository.findMovieByNumberAndVariant(libraryRoot, number, generated.fileName)
-            ?: error("STRM 已添加，但扫描后没有在影片库中找到 $number")
-        recordRepository.attachMovie(pickcode, movieForScrape.id)
 
+        /*
+         * ================================================================================
+         * 步骤6：把临时 STRM 刮削到影片库
+         * ================================================================================
+         * 目标：保持 STRM 临时目录和影片库目录职责分离。
+         * 数据源：STRM 临时文件、115 番号和影片库目录。
+         * 操作：
+         * 1) 从 STRM 临时目录读取源文件，不把临时目录写入 Room 影片库记录。
+         * 2) 刮削结果、NFO 和图片统一写入影片库目录。
+         * 3) 刮削完成后只扫描影片库目录，避免影片记录指向 STRM 临时目录。
+         */
+        scrapeRepository.appendLog("开始刮削并整理到影片库：$number，来源：${settingsRepository.getDefaultScrapeSource()}")
         val source = settingsRepository.getDefaultScrapeSource()
-        scrapeRepository.appendLog("开始刮削队列影片：$number，来源：$source")
         val scrapeResult = scrapeRepository.scrapeStrmUriWithOutput(
-            libraryRootUri = libraryRoot,
+            sourceRootUri = strmRoot,
             strmUri = generated.strmUri,
             source = source,
-            forceDistinct = generated.forceDistinct
+            forceDistinct = generated.forceDistinct,
+            outputRootUri = libraryRoot
         )
-        scrapeRepository.appendLog("刮削完成，开始刷新单个影片：$number")
-        val refreshedMovie = movieRepository.scanSingleMovie(rootUri, Uri.parse(scrapeResult.strmUri), mergeByMovieNumber = !generated.forceDistinct)
-        if (refreshedMovie != null) {
-            if (
-                addedMovie != null &&
-                addedMovie.id != refreshedMovie.id &&
-                addedMovie.videoUri != refreshedMovie.videoUri
-            ) {
-                movieRepository.deleteMovie(addedMovie.id)
-                scrapeRepository.appendLog("已删除刮削前临时入库记录，避免重复显示：${addedMovie.videoName}")
-            }
-            recordRepository.updateStrmLocation(
-                pickcode = pickcode,
-                strmUri = refreshedMovie.videoUri,
-                libraryRootUri = refreshedMovie.libraryRootUri,
-                movieId = refreshedMovie.id
-            )
-        } else {
-            scrapeRepository.appendLog("未定位到整理后的 STRM，跳过单片刷新：$number")
-        }
+        scrapeRepository.appendLog("刮削完成，开始扫描影片库中的整理结果：$number")
+        val refreshedMovie = movieRepository.scanSingleMovie(
+            libraryRootUri,
+            Uri.parse(scrapeResult.strmUri),
+            mergeByMovieNumber = !generated.forceDistinct
+        )
+        val movieForScrape = refreshedMovie
+            ?: movieRepository.findMovieByNumberAndVariant(libraryRoot, number, generated.fileName)
+            ?: error("刮削完成，但影片库中没有找到 $number")
+        recordRepository.updateStrmLocation(
+            pickcode = pickcode,
+            strmUri = movieForScrape.videoUri,
+            libraryRootUri = movieForScrape.libraryRootUri,
+            movieId = movieForScrape.id
+        )
+        scrapeRepository.appendLog("影片库入库完成：$number")
         return CloudAddResult(
             pickcode = pickcode,
             message = if (generated.created) {
@@ -593,9 +929,13 @@ class CloudBrowserViewModel(
 
     private suspend fun buildPendingMissavContext(item: Cloud115FileItem, pickcode: String): PendingMissavScrape? {
         val libraryRoot = settingsRepository.getLibraryRootUri() ?: return null
+        val sourceRoot = settingsRepository.getStrmTreeUri() ?: return null
         val number = MovieNumberExtractor.extract(item.name) ?: return null
+        val strmUri = recordRepository.get(pickcode)?.strmUri ?: return null
         return PendingMissavScrape(
             libraryRootUri = libraryRoot,
+            sourceRootUri = sourceRoot,
+            strmUri = strmUri,
             number = number,
             sourceName = item.name,
             pickcode = pickcode
@@ -653,6 +993,8 @@ class CloudBrowserViewModel(
     }
 
     companion object {
+        private const val TAG = "CloudBrowserViewModel"
+
         fun factory(
             strmRepository: Cloud115StrmRepository,
             recordRepository: CloudStrmRecordRepository,
@@ -704,6 +1046,11 @@ data class CloudBrowserUiState(
     val excludedVideoNames: Set<String> = emptySet(),
     val addingDomesticFolderCids: Set<Long> = emptySet(),
     val addedDomesticFolderCids: Set<Long> = emptySet(),
+    val addingFolderCids: Set<Long> = emptySet(),
+    val addedFolderCids: Set<Long> = emptySet(),
+    val folderBatchProgress: FolderBatchProgress? = null,
+    val isRandomPlaybackLoading: Boolean = false,
+    val randomPlaybackItems: List<Cloud115FileItem>? = null,
     val hiddenMissavRequest: HiddenMissavWebRequest? = null,
     val pendingMissavScrape: PendingMissavScrape? = null,
     val pendingReplaceConflict: PendingReplaceConflict? = null,
@@ -734,8 +1081,20 @@ private data class CloudDirectoryLoadResult(
     val addedDomesticFolderCids: Set<Long>
 )
 
+data class FolderBatchProgress(
+    val folderName: String,
+    val current: Int = 0,
+    val total: Int = 0,
+    val success: Int = 0,
+    val skipped: Int = 0,
+    val failed: Int = 0,
+    val currentFileName: String? = null
+)
+
 data class PendingMissavScrape(
     val libraryRootUri: String,
+    val sourceRootUri: String,
+    val strmUri: String,
     val number: String,
     val sourceName: String,
     val pickcode: String
@@ -746,6 +1105,12 @@ private data class PendingCloudAdd(
     val pickcode: String,
     val forceDistinct: Boolean,
     val alreadyMarkedAdding: Boolean
+)
+
+private data class PreparedCloudAdd(
+    val item: Cloud115FileItem,
+    val pickcode: String,
+    val generated: GeneratedStrmFile
 )
 
 data class PendingReplaceConflict(

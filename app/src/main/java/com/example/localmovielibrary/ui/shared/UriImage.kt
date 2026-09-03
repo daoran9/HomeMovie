@@ -36,7 +36,8 @@ fun UriImage(
     modifier: Modifier = Modifier,
     contentScale: ContentScale = ContentScale.Crop,
     alignment: Alignment = Alignment.Center,
-    maxDecodeSize: Int = 1200
+    maxDecodeSize: Int = 1200,
+    refreshVersion: Long = 0L
 ) {
     if (uri.isNullOrBlank()) {
         Box(
@@ -48,10 +49,21 @@ fun UriImage(
     }
 
     val context = LocalContext.current
-    val image = produceState<ImageBitmap?>(initialValue = null, uri, maxDecodeSize) {
+    /*
+     * ================================================================================
+     * 步骤1：按媒体更新时间隔离图片缓存
+     * ================================================================================
+     * 目标：同一 SAF URI 被重新刮削覆盖后，不复用旧封面、缩略图或背景图的位图缓存。
+     * 数据源：图片 URI 与媒体记录的 updatedAt。
+     * 操作：
+     * 1) 未提供版本时保留现有缓存键，避免普通图片重复解码。
+     * 2) 提供版本时生成新缓存键，让已更新媒体重新读取同一 URI。
+     */
+    val cacheIdentity = uriImageCacheIdentity(uri, refreshVersion)
+    val image = produceState<ImageBitmap?>(initialValue = null, uri, maxDecodeSize, cacheIdentity) {
         repeat(VISIBLE_IMAGE_RETRY_COUNT) { attempt ->
             value = withContext(Dispatchers.IO) {
-                loadUriImageWithRetry(context, uri, maxDecodeSize)
+                loadUriImageWithRetry(context, uri, maxDecodeSize, cacheIdentity)
             }
             if (value != null) return@produceState
             delay(VISIBLE_IMAGE_RETRY_DELAYS_MS.getOrElse(attempt) { VISIBLE_IMAGE_RETRY_DELAYS_MS.last() })
@@ -117,28 +129,29 @@ private fun CenterCropImage(bitmap: ImageBitmap, modifier: Modifier) {
 private suspend fun loadUriImageWithRetry(
     context: Context,
     uriString: String,
-    maxDecodeSize: Int
+    maxDecodeSize: Int,
+    cacheIdentity: String
 ): ImageBitmap? {
-    ImageMemoryCache.get(uriString, maxDecodeSize)?.let { return it }
-    if (ImageFailureCache.isRecentlyFailed(uriString, maxDecodeSize)) return null
+    ImageMemoryCache.get(cacheIdentity, maxDecodeSize)?.let { return it }
+    if (ImageFailureCache.isRecentlyFailed(cacheIdentity, maxDecodeSize)) return null
     repeat(DECODE_RETRY_COUNT) { attempt ->
         val decoded = ImageDecodeLimiter.withPermit {
-            if (ImageFailureCache.isRecentlyFailed(uriString, maxDecodeSize)) return null
-            ImageMemoryCache.get(uriString, maxDecodeSize)
-                ?: runCatching { loadDiskCachedImage(context, uriString, maxDecodeSize) }.getOrNull()
+            if (ImageFailureCache.isRecentlyFailed(cacheIdentity, maxDecodeSize)) return null
+            ImageMemoryCache.get(cacheIdentity, maxDecodeSize)
+                ?: runCatching { loadDiskCachedImage(context, cacheIdentity, maxDecodeSize) }.getOrNull()
                 ?: runCatching {
                     decodeUriImage(context.contentResolver, Uri.parse(uriString), maxDecodeSize).also { bitmap ->
-                        writeDiskCachedImage(context, uriString, maxDecodeSize, bitmap)
+                        writeDiskCachedImage(context, cacheIdentity, maxDecodeSize, bitmap)
                     }.asImageBitmap()
                 }.getOrNull()
         }
         if (decoded != null) {
-            ImageMemoryCache.put(uriString, maxDecodeSize, decoded)
+            ImageMemoryCache.put(cacheIdentity, maxDecodeSize, decoded)
             return decoded
         }
         delay(DECODE_RETRY_DELAYS_MS.getOrElse(attempt) { DECODE_RETRY_DELAYS_MS.last() })
     }
-    ImageFailureCache.markFailed(uriString, maxDecodeSize)
+    ImageFailureCache.markFailed(cacheIdentity, maxDecodeSize)
     return null
 }
 
@@ -194,10 +207,13 @@ private fun writeDiskCachedImage(
     }
 }
 
-private fun diskCacheFile(context: Context, uriString: String, maxDecodeSize: Int): File {
-    val key = "$uriString#$maxDecodeSize".sha256()
+private fun diskCacheFile(context: Context, cacheIdentity: String, maxDecodeSize: Int): File {
+    val key = "$cacheIdentity#$maxDecodeSize".sha256()
     return File(File(context.cacheDir, DISK_CACHE_DIR), "$key.jpg")
 }
+
+internal fun uriImageCacheIdentity(uri: String, refreshVersion: Long): String =
+    if (refreshVersion > 0L) "$uri#refresh=$refreshVersion" else uri
 
 private fun String.sha256(): String {
     val bytes = MessageDigest.getInstance("SHA-256").digest(toByteArray(Charsets.UTF_8))

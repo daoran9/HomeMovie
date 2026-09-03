@@ -28,7 +28,8 @@ fun MovieArtwork(
             uri = imageUri,
             modifier = Modifier.fillMaxSize(),
             contentScale = contentScale,
-            maxDecodeSize = maxDecodeSize
+            maxDecodeSize = maxDecodeSize,
+            refreshVersion = movie.updatedAt
         )
         if (imageUri == null) {
             MovieArtworkPlaceholder(title = movie.title)

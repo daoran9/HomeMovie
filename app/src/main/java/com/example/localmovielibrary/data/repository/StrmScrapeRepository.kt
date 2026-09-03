@@ -4,9 +4,14 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.example.localmovielibrary.data.local.MovieEntity
+import com.example.localmovielibrary.scraper.ActorAliasLookup
 import com.example.localmovielibrary.scraper.ActorAvatarStore
 import com.example.localmovielibrary.scraper.Dmm2Scraper
 import com.example.localmovielibrary.scraper.DmmScraper
+import com.example.localmovielibrary.scraper.GfriendsActorAvatarRepository
+import com.example.localmovielibrary.scraper.JavdbScraper
+import com.example.localmovielibrary.scraper.JavlibraryScraper
+import com.example.localmovielibrary.scraper.JavlibraryWebViewFetcher
 import com.example.localmovielibrary.scraper.JavbusScraper
 import com.example.localmovielibrary.scraper.MissavScraper
 import com.example.localmovielibrary.scraper.MovieNumberExtractor
@@ -18,17 +23,27 @@ import com.example.localmovielibrary.scraper.ScrapeLogStore
 import com.example.localmovielibrary.scraper.ScrapeRunResult
 import com.example.localmovielibrary.scraper.ScrapeSource
 import com.example.localmovielibrary.scraper.ScrapedMovieInfo
+import com.example.localmovielibrary.scraper.actorNameParts
+import com.example.localmovielibrary.scraper.actorNameVariants
+import com.example.localmovielibrary.scraper.actorNamesHaveExactVariant
+import com.example.localmovielibrary.scraper.actorNamesMatch
+import com.example.localmovielibrary.scraper.dmmFanzaActorImageCandidates
+import com.example.localmovielibrary.scraper.isNonActorCategoryName
+import com.example.localmovielibrary.scraper.canonicalizeActorIdentities
 import com.example.localmovielibrary.util.MovieVariant
 import com.example.localmovielibrary.util.detectMovieVariant
 import com.example.localmovielibrary.util.displayNumberWithVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
 import com.example.localmovielibrary.util.playbackSourceSuffix
+import com.example.localmovielibrary.scraper.primaryActorName
+import com.example.localmovielibrary.scraper.withSupplementalActors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -37,6 +52,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
 import kotlin.system.measureTimeMillis
 
@@ -51,26 +67,55 @@ class StrmScrapeRepository(
     private val dmm2Scraper: Dmm2Scraper = Dmm2Scraper(client = httpClient, ioDispatcher = ioDispatcher, logger = logStore::append),
     private val officialScraper: OfficialScraper = OfficialScraper(client = httpClient, ioDispatcher = ioDispatcher),
     private val javbusScraper: JavbusScraper = JavbusScraper(client = httpClient, ioDispatcher = ioDispatcher),
+    private val javlibraryWebViewFetcher: JavlibraryWebViewFetcher? = null,
+    private val javdbScraper: JavdbScraper = JavdbScraper(
+        client = httpClient,
+        ioDispatcher = ioDispatcher,
+        cookieProvider = settingsRepository::getJavdbCookies,
+        logger = logStore::append,
+        webViewFetcher = javlibraryWebViewFetcher
+    ),
+    private val javlibraryScraper: JavlibraryScraper = JavlibraryScraper(
+        client = httpClient,
+        ioDispatcher = ioDispatcher,
+        cookieProvider = settingsRepository::getJavlibraryCookies,
+        logger = logStore::append,
+        webViewFetcher = javlibraryWebViewFetcher
+    ),
     private val missavScraper: MissavScraper = MissavScraper(
         cookieProvider = settingsRepository::getMissavCookies,
         client = httpClient,
         ioDispatcher = ioDispatcher
     ),
     private val scraperRegistry: MovieScraperRegistry = MovieScraperRegistry(
-        listOf(dmmScraper, dmm2Scraper, officialScraper, javbusScraper, missavScraper)
+        listOf(dmmScraper, dmm2Scraper, officialScraper, javbusScraper, javdbScraper, javlibraryScraper, missavScraper),
+        logger = logStore::append,
+        webViewBackedSources = if (javlibraryWebViewFetcher == null) {
+            emptySet()
+        } else {
+            setOf(ScrapeSource.Javdb, ScrapeSource.Javlibrary)
+        }
     ),
     private val imageDownloadService: ImageDownloadService = ImageDownloadService(
         httpClient = httpClient,
         retryCountProvider = settingsRepository::getImageDownloadRetryCount,
         logger = logStore::append,
         ioDispatcher = ioDispatcher
-    )
+    ),
+    private val refreshMovieMetadata: suspend (Long) -> Boolean = { false }
 ) {
     private val actorAvatarStore = ActorAvatarStore(context)
+    private val gfriendsActorAvatarRepository = GfriendsActorAvatarRepository(
+        context = context,
+        client = httpClient,
+        ioDispatcher = ioDispatcher,
+        logger = logStore::append
+    )
     private val backgroundScope = CoroutineScope(SupervisorJob() + ioDispatcher)
     private var actorAvatarJob: Job? = null
     private val scrapeAdmissionMutex = Mutex()
     private val missavScrapeMutex = Mutex()
+    private val libraryDirectoryMutex = Mutex()
     private val _scrapeQueueState = MutableStateFlow(ScrapeQueueState())
     private val _actorAvatarUpdateState = MutableStateFlow(ActorAvatarUpdateState())
     val scrapeQueueState: StateFlow<ScrapeQueueState> = _scrapeQueueState
@@ -219,39 +264,53 @@ class StrmScrapeRepository(
     }
 
     suspend fun scrapeStrmUriWithOutput(
-        libraryRootUri: String,
+        sourceRootUri: String,
         strmUri: String,
         source: ScrapeSource,
-        forceDistinct: Boolean = false
+        forceDistinct: Boolean = false,
+        outputRootUri: String? = null
     ): ScrapedMovieWriteResult = runQueuedScrapeTask(
         label = "scrape-uri:${Uri.parse(strmUri).lastPathSegment.orEmpty()}:${source.label}",
         serialMutex = source.serialScrapeMutex()
     ) {
-        val root = DocumentFile.fromTreeUri(context, Uri.parse(libraryRootUri))
-            ?: error("影片库目录不可用")
-        val target = findTargetFast(root, libraryRootUri, strmUri)
+        val sourceRoot = DocumentFile.fromTreeUri(context, Uri.parse(sourceRootUri))
+            ?: error("STRM 源目录不可用")
+        val outputRoot = outputRootUri?.let { uriString ->
+            DocumentFile.fromTreeUri(context, Uri.parse(uriString))
+                ?: error("影片库目录不可用")
+        }
+        val target = findTargetFast(sourceRoot, sourceRootUri, strmUri)
             ?: error("当前 STRM 文件不存在")
-        scrapeTargetWithOutput(target, source, forceDistinct)
+        scrapeTargetWithOutput(target, source, forceDistinct, outputRoot)
     }
 
     private suspend fun scrapeTargetWithOutput(
         target: StrmTarget,
         source: ScrapeSource,
-        forceDistinct: Boolean
+        forceDistinct: Boolean,
+        outputRoot: DocumentFile? = null
     ): ScrapedMovieWriteResult {
         val number = MovieNumberExtractor.extract(target.file.name.orEmpty())
             ?: error("无法从文件名提取番号：${target.file.name}")
 
-        dmm2SkipMessage(source, number)?.let { message ->
-            logStore.append("Skipped: $message")
-            error(message)
+        val excludedSources = excludedSourcesFor(number)
+        if (excludedSources.isNotEmpty()) {
+            logStore.append("DMM2 skipped for $number; continue fallback sources")
         }
         logStore.append("Start scrape: file=${target.file.name}, number=$number, source=${source.label}")
         appendMovieDivider("Start movie scrape", number, target.file.name.orEmpty(), source)
-        val info = scraperRegistry.scrape(source, number)
+        logStore.append("Collect all metadata sources for scrape: $number")
+        val scrapedInfo = scraperRegistry.scrapeWithFallback(
+            preferred = source,
+            number = number,
+            excludedSources = excludedSources,
+            collectAllSources = true
+        )
+        val info = scrapedInfo.withResolvedActorAliases(
+            downloadActorAvatars(scrapedInfo, reuseMergedActorIdentities = true)
+        )
         logStore.append("Metadata fetched: ${info.title.ifBlank { number }}")
-        val strmUri = writeOrganizedScrapeFiles(target, info, number, forceDistinct)
-        downloadActorAvatars(info)
+        val strmUri = writeOrganizedScrapeFiles(target, info, number, forceDistinct, outputRoot)
         logStore.append("Movie scrape finished: $number")
         return ScrapedMovieWriteResult(info = info, strmUri = strmUri)
     }
@@ -274,13 +333,58 @@ class StrmScrapeRepository(
 
             logStore.append("Parse MissAV WebView HTML: $number")
             appendMovieDivider("Start MissAV WebView scrape", number, target.file.name.orEmpty(), ScrapeSource.Missav)
-            val info = missavScraper.scrapeFromHtml(number, html)
+            val scrapedInfo = missavScraper.scrapeFromHtml(number, html)
+            val info = scrapedInfo.withResolvedActorAliases(downloadActorAvatars(scrapedInfo))
             logStore.append("MissAV WebView metadata parsed: ${info.title.ifBlank { number }}")
             val strmUri = writeOrganizedScrapeFiles(target, info, number)
-            downloadActorAvatars(info)
             logStore.append("MissAV WebView scrape finished: $number")
             ScrapedMovieWriteResult(info = info, strmUri = strmUri)
         }
+
+    /*
+     * ================================================================================
+     * 步骤7：用 MissAV WebView 页面刮削临时 STRM
+     * ================================================================================
+     * 目标：在网盘批量入库时，不先把临时 STRM 错当成影片库影片。
+     * 数据源：STRM 临时目录、WebView HTML、影片库输出目录。
+     * 操作：
+     * 1) 从临时目录定位 STRM，不写入临时影片库记录。
+     * 2) 解析 WebView HTML 并把整理结果写入影片库目录。
+     * 3) 返回影片库中的最终 STRM URI，交给调用方扫描入库。
+     */
+    suspend fun scrapeStrmUriWithMissavHtmlOutput(
+        sourceRootUri: String,
+        strmUri: String,
+        html: String,
+        cookie: String,
+        outputRootUri: String
+    ): ScrapedMovieWriteResult = runQueuedScrapeTask(
+        label = "missav-webview-uri:${Uri.parse(strmUri).lastPathSegment.orEmpty()}",
+        serialMutex = missavScrapeMutex
+    ) {
+        if (cookie.isNotBlank()) {
+            settingsRepository.saveMissavCookies(cookie)
+            logStore.append("MissAV WebView cookie saved")
+        }
+        val sourceRoot = DocumentFile.fromTreeUri(context, Uri.parse(sourceRootUri))
+            ?: error("STRM 源目录不可用")
+        val outputRoot = DocumentFile.fromTreeUri(context, Uri.parse(outputRootUri))
+            ?: error("影片库目录不可用")
+        val target = findTargetFast(sourceRoot, sourceRootUri, strmUri)
+            ?: error("当前 STRM 文件不存在")
+        val number = MovieNumberExtractor.extract(target.file.name.orEmpty())
+            ?: error("无法从文件名提取番号：${target.file.name}")
+        logStore.append("Parse MissAV WebView HTML: $number")
+        appendMovieDivider("Start MissAV WebView URI scrape", number, target.file.name.orEmpty(), ScrapeSource.Missav)
+        val scrapedInfo = missavScraper.scrapeFromHtml(number, html)
+        val info = scrapedInfo.withResolvedActorAliases(
+            downloadActorAvatars(scrapedInfo, reuseMergedActorIdentities = true)
+        )
+        logStore.append("MissAV WebView metadata parsed: ${info.title.ifBlank { number }}")
+        val finalStrmUri = writeOrganizedScrapeFiles(target, info, number, outputRoot = outputRoot)
+        logStore.append("MissAV WebView URI scrape finished: $number")
+        ScrapedMovieWriteResult(info = info, strmUri = finalStrmUri)
+    }
 
     suspend fun rescrapeMovie(movie: MovieEntity, source: ScrapeSource): ScrapedMovieInfo = runQueuedScrapeTask(
         label = "rescrape:${movie.videoName}:${source.label}",
@@ -291,16 +395,22 @@ class StrmScrapeRepository(
             ?: MovieNumberExtractor.extract(movie.title)
             ?: error("无法从文件名提取番号：${target.file.name}")
 
-        dmm2SkipMessage(source, number)?.let { message ->
-            logStore.append("Skipped: $message")
-            error(message)
+        val excludedSources = excludedSourcesFor(number)
+        if (excludedSources.isNotEmpty()) {
+            logStore.append("DMM2 skipped for $number; continue fallback sources")
         }
         logStore.append("Start rescrape: file=${target.file.name}, number=$number, source=${source.label}")
         appendMovieDivider("Start movie rescrape", number, target.file.name.orEmpty(), source)
-        val info = scraperRegistry.scrape(source, number)
+        logStore.append("Collect all metadata sources for rescrape: $number")
+        val scrapedInfo = scraperRegistry.scrapeWithFallback(
+            preferred = source,
+            number = number,
+            excludedSources = excludedSources,
+            collectAllSources = true
+        )
+        val info = scrapedInfo.withResolvedActorAliases(downloadActorAvatars(scrapedInfo))
         logStore.append("Rescrape metadata fetched: ${info.title.ifBlank { number }}")
         rewriteScrapeFilesInPlace(target, info)
-        downloadActorAvatars(info)
         logStore.append("Movie rescrape finished: $number")
         info
     }
@@ -321,10 +431,10 @@ class StrmScrapeRepository(
 
             logStore.append("Parse MissAV WebView HTML for rescrape: $number")
             appendMovieDivider("Start MissAV WebView rescrape", number, target.file.name.orEmpty(), ScrapeSource.Missav)
-            val info = missavScraper.scrapeFromHtml(number, html)
+            val scrapedInfo = missavScraper.scrapeFromHtml(number, html)
+            val info = scrapedInfo.withResolvedActorAliases(downloadActorAvatars(scrapedInfo))
             logStore.append("MissAV WebView rescrape parsed: ${info.title.ifBlank { number }}")
             rewriteScrapeFilesInPlace(target, info)
-            downloadActorAvatars(info)
             logStore.append("MissAV WebView rescrape finished: $number")
             info
         }
@@ -360,19 +470,26 @@ class StrmScrapeRepository(
                 logStore.append("Skipped: cannot extract number from ${target.file.name}")
                 return@forEach
             }
-            dmm2SkipMessage(source, number)?.let { message ->
-                skipped += 1
-                logStore.append("Skipped: $message")
-                return@forEach
+            val excludedSources = excludedSourcesFor(number)
+            if (excludedSources.isNotEmpty()) {
+                logStore.append("DMM2 skipped for $number; continue fallback sources")
             }
 
             runCatching {
                 logStore.append("Scraping $number, file=${target.file.name}")
                 appendMovieDivider("Start batch movie scrape", number, target.file.name.orEmpty(), source)
-                val info = scraperRegistry.scrape(source, number)
+                logStore.append("Collect all metadata sources for batch scrape: $number")
+                val scrapedInfo = scraperRegistry.scrapeWithFallback(
+                    preferred = source,
+                    number = number,
+                    excludedSources = excludedSources,
+                    collectAllSources = true
+                )
+                val info = scrapedInfo.withResolvedActorAliases(
+                    downloadActorAvatars(scrapedInfo, reuseMergedActorIdentities = true)
+                )
                 logStore.append("Metadata fetched: $number")
                 writeOrganizedScrapeFiles(target, info, number)
-                downloadActorAvatars(info)
                 success += 1
                 logStore.append("Success: $number -> ${info.title}")
             }.onFailure { error ->
@@ -395,6 +512,13 @@ class StrmScrapeRepository(
             null
         }
     }
+
+    private fun excludedSourcesFor(number: String): Set<ScrapeSource> =
+        if (dmm2SkipMessage(ScrapeSource.Dmm2, number) != null) {
+            setOf(ScrapeSource.Dmm2)
+        } else {
+            emptySet()
+        }
 
     suspend fun clearScrapeFiles(movie: MovieEntity): String = withContext(ioDispatcher) {
         val target = findTargetForMovie(movie)
@@ -424,21 +548,30 @@ class StrmScrapeRepository(
         number
     }
 
-    fun startUpdateMissingActorAvatars(movies: List<MovieEntity>) {
+    fun startUpdateMissingActorAvatars(
+        movies: List<MovieEntity>,
+        forceRefresh: Boolean = false,
+        allowGfriends: Boolean = settingsRepository.isGfriendsActorAvatarEnabled()
+    ) {
         if (actorAvatarJob?.isActive == true) {
             logStore.append("Actor avatar update is already running")
             return
         }
         actorAvatarJob = backgroundScope.launch {
-            _actorAvatarUpdateState.value = ActorAvatarUpdateState(isUpdating = true, message = "Updating missing actor avatars...")
-            runCatching { updateMissingActorAvatarsInternal(movies) }
+            _actorAvatarUpdateState.value = ActorAvatarUpdateState(
+                isUpdating = true,
+                message = if (forceRefresh) "正在全库重匹配演员头像（不使用 gfriends）..." else "正在补齐缺失演员头像..."
+            )
+            runCatching { updateMissingActorAvatarsInternal(movies, forceRefresh, allowGfriends) }
                 .onSuccess { result ->
                     _actorAvatarUpdateState.value = ActorAvatarUpdateState(
                         isUpdating = false,
-                        message = if (result.totalMissing == 0) {
-                            "Actor avatars are already up to date"
+                        message = if (result.forceRefresh) {
+                            "演员头像重匹配完成：${result.totalActors} 人，处理 ${result.scrapedMovies} 部影片"
+                        } else if (result.totalMissing == 0) {
+                            "演员头像已是最新"
                         } else {
-                            "Actor avatars updated: ${result.downloaded}/${result.totalMissing}"
+                            "演员头像已补齐：${result.downloaded}/${result.totalMissing}"
                         },
                         refreshVersion = _actorAvatarUpdateState.value.refreshVersion + 1
                     )
@@ -455,56 +588,123 @@ class StrmScrapeRepository(
         }
     }
 
-    private suspend fun updateMissingActorAvatarsInternal(movies: List<MovieEntity>): ActorAvatarUpdateResult {
-        val missingActors = movies
+    private suspend fun updateMissingActorAvatarsInternal(
+        movies: List<MovieEntity>,
+        forceRefresh: Boolean,
+        allowGfriends: Boolean
+    ): ActorAvatarUpdateResult {
+        val allActors = movies
             .flatMap { it.actors }
             .map { it.trim() }
-            .filter { it.isNotBlank() }
+            .filter { actor -> actor.isNotBlank() && !isNonActorCategoryName(actor.primaryActorName()) }
             .distinctBy { it.normalizedActorName() }
-            .filterNot { actorAvatarStore.hasAvatar(it) }
+        val missingActors = if (forceRefresh) allActors else allActors.filterNot { actorAvatarStore.hasAvatar(it) }
+        val aliasSyncActors = allActors.filter { actorAvatarStore.hasAvatar(it) }
 
-        if (missingActors.isEmpty()) {
-            logStore.append("Actor avatar update: no missing avatars")
-            return ActorAvatarUpdateResult(totalMissing = 0, downloaded = 0, scrapedMovies = 0)
+        if (missingActors.isEmpty() && aliasSyncActors.isEmpty()) {
+            logStore.append("Actor avatar update: no missing avatars or aliases")
+            return ActorAvatarUpdateResult(
+                totalMissing = 0,
+                downloaded = 0,
+                scrapedMovies = 0,
+                totalActors = allActors.size,
+                forceRefresh = forceRefresh
+            )
         }
 
-        logStore.append("Start actor avatar update, missing=${missingActors.size}")
+        logStore.append("Start actor avatar update, missing=${missingActors.size}, aliasSync=${aliasSyncActors.size}")
         val pending = missingActors.toMutableSet()
+        val aliasPending = aliasSyncActors.toMutableSet()
         val visitedNumbers = mutableSetOf<String>()
         var scrapedMovies = 0
 
-        movies
-            .filter { movie -> movie.actors.any { actor -> pending.any { it.sameActor(actor) } } }
-            .forEach { movie ->
-                if (pending.isEmpty()) return@forEach
-                val number = MovieNumberExtractor.extract(movie.videoName)
-                    ?: MovieNumberExtractor.extract(movie.title)
-                    ?: MovieNumberExtractor.extract(movie.originalTitle.orEmpty())
-                    ?: return@forEach
-                if (!visitedNumbers.add(number.uppercase())) return@forEach
-
-                runCatching {
-                    logStore.append("Query DMM2 for actor avatars: $number")
-                    val info = dmm2Scraper.scrape(number)
-                    scrapedMovies += 1
-                    downloadActorAvatars(info)
-                    val resolved = pending.filter { actorAvatarStore.hasAvatar(it) }
-                    pending.removeAll(resolved.toSet())
-                    if (resolved.isNotEmpty()) {
-                        logStore.append("Actor avatars resolved: ${resolved.joinToString(", ")}")
-                    }
-                }.onFailure { error ->
-                    if (error is CancellationException) throw error
-                    logStore.append("DMM2 actor avatar query failed: $number, ${error.message ?: error::class.java.simpleName}")
-                }
+        for (movie in movies) {
+            if (!forceRefresh && pending.isEmpty() && aliasPending.isEmpty()) break
+            val missingForMovie = movie.actors.any { actor -> pending.any { it.sameActorExactly(actor) } }
+            val aliasesForMovie = aliasPending.filter { actor -> movie.actors.any { it.sameActorExactly(actor) } }
+            if (!forceRefresh && !missingForMovie && aliasesForMovie.isEmpty()) continue
+            val number = MovieNumberExtractor.extract(movie.videoName)
+                ?: MovieNumberExtractor.extract(movie.title)
+                ?: MovieNumberExtractor.extract(movie.originalTitle.orEmpty())
+                ?: continue
+            if (!visitedNumbers.add(number.uppercase())) {
+                continue
             }
+
+            runCatching {
+                logStore.append("Query metadata sources for actor avatars: $number")
+                /*
+                 * ================================================================================
+                 * 步骤1：收集全量演员资料源
+                 * ================================================================================
+                 * 目标：全库任务不能因 DMM2 已有封面或头像就跳过其它来源的多人演员。
+                 * 数据源：DMM/FANZA、JavDB、JavLibrary、JavBus、旧 DMM 和厂商官网的同番号详情。
+                 * 操作：
+                 * 1) 无论首源是否完整，都读取全部非 MissAV 资料源。
+                * 2) 只按同名或来源明确给出的别名融合，禁止按数量或位置猜测。
+                 */
+                val info = scraperRegistry.scrapeWithFallback(
+                    preferred = ScrapeSource.Dmm2,
+                    number = number,
+                    excludedSources = excludedSourcesFor(number),
+                    fallbackOrder = ACTOR_AVATAR_METADATA_FALLBACK_ORDER,
+                    collectAllSources = true
+                )
+                scrapedMovies += 1
+                val avatarInfo = info
+                    .withLibraryActors(movie.actors)
+                    .withExternalActorsWhenMissing(number)
+                val resolvedInfo = avatarInfo.withResolvedActorAliases(downloadActorAvatars(
+                    avatarInfo,
+                    forceRefresh = forceRefresh,
+                    allowGfriends = allowGfriends,
+                    reuseMergedActorIdentities = true
+                ))
+                updateActorAliasesInNfo(movie, resolvedInfo)
+                val resolved = pending.filter { actorAvatarStore.hasAvatar(it) }
+                pending.removeAll(resolved.toSet())
+                aliasPending.removeAll(aliasesForMovie.toSet())
+                if (resolved.isNotEmpty()) {
+                    logStore.append("Actor avatars resolved: ${resolved.joinToString(", ")}")
+                }
+            }.onFailure { error ->
+                if (error is CancellationException) throw error
+                logStore.append("Metadata sources actor avatar query failed: $number, ${error.message ?: error::class.java.simpleName}")
+            }
+        }
+
+        /*
+         * ================================================================================
+         * 步骤2：最后使用 Fusion 共用头像库兜底
+         * ================================================================================
+         * 目标：只有 DMM/FANZA、JavDB 别名和资料源都没有结果时才访问 gfriends。
+         * 数据源：前面各影片回查后仍未解决的演员集合。
+         * 操作：
+         * 1) 禁止再次发起 DMM/JavDB 请求。
+         * 2) 仅查询 gfriends 并写入剩余演员头像。
+         */
+        val unresolved = pending.filterNot { actorAvatarStore.hasAvatar(it) }
+        if (unresolved.isNotEmpty() && allowGfriends) {
+            downloadActorAvatars(
+                ScrapedMovieInfo(number = "", title = "", actors = unresolved),
+                allowDmmName = false,
+                allowJavdbAliases = false,
+                allowJavlibraryAliases = false,
+                allowSourceImages = false,
+                allowGfriends = true
+            )
+        } else if (unresolved.isNotEmpty()) {
+            logStore.append("Actor avatars unresolved; gfriends disabled: ${unresolved.size}")
+        }
 
         val downloaded = missingActors.count { actorAvatarStore.hasAvatar(it) }
         logStore.append("Actor avatar update finished: downloaded=$downloaded/${missingActors.size}, scrapedMovies=$scrapedMovies")
         return ActorAvatarUpdateResult(
             totalMissing = missingActors.size,
             downloaded = downloaded,
-            scrapedMovies = scrapedMovies
+            scrapedMovies = scrapedMovies,
+            totalActors = allActors.size,
+            forceRefresh = forceRefresh
         )
     }
 
@@ -520,6 +720,39 @@ class StrmScrapeRepository(
                 logStore.append("当前记录 STRM 已移动，已定位到整理后的文件：${target.file.name}")
             }
             ?: error("当前 STRM 文件不存在")
+    }
+
+    /**
+     * ================================================================================
+     * 步骤1：写回全库任务发现的演员别名
+     * ================================================================================
+     * 目标：让头像更新任务发现的 JavDB/JavLibrary 别名进入影片库和演员索引。
+     * 数据源：已有 NFO、当前影片和本次融合出的演员别名。
+     * 操作：
+     * 1) 仅替换已有 actor/name，保留其它 NFO 标签。
+     * 2) 写入成功后刷新该影片的 Room 记录。
+     */
+    private suspend fun updateActorAliasesInNfo(movie: MovieEntity, info: ScrapedMovieInfo) {
+        if (movie.nfoUri.isNullOrBlank()) return
+        val nfoFile = DocumentFile.fromSingleUri(context, Uri.parse(movie.nfoUri))
+            ?.takeIf { it.isFile }
+            ?: return
+        val existingNfo = context.contentResolver.openInputStream(nfoFile.uri)
+            ?.bufferedReader(Charsets.UTF_8)
+            ?.use { reader -> reader.readText() }
+            ?: return
+        val updatedNfo = NfoWriter.mergeActorDisplayNames(existingNfo, info)
+        if (updatedNfo == existingNfo) return
+
+        context.contentResolver.openOutputStream(nfoFile.uri, "wt")?.use { output ->
+            output.write(updatedNfo.toByteArray(Charsets.UTF_8))
+        } ?: error("无法写入演员别名 NFO：${nfoFile.name}")
+        logStore.append("Actor aliases written to NFO: ${movie.videoName}")
+        val refreshed = refreshMovieMetadata(movie.id)
+        logStore.append(
+            if (refreshed) "Actor aliases refreshed in library: ${movie.videoName}"
+            else "Actor aliases wrote NFO but library refresh skipped: ${movie.videoName}"
+        )
     }
 
     private fun findMovedTargetForMovie(root: DocumentFile, movie: MovieEntity): StrmTarget? {
@@ -555,19 +788,40 @@ class StrmScrapeRepository(
         return walk(root, null)
     }
 
-    private suspend fun writeOrganizedScrapeFiles(target: StrmTarget, info: ScrapedMovieInfo, fallbackNumber: String, forceDistinct: Boolean = false): String {
+    private suspend fun writeOrganizedScrapeFiles(
+        target: StrmTarget,
+        info: ScrapedMovieInfo,
+        fallbackNumber: String,
+        forceDistinct: Boolean = false,
+        outputRoot: DocumentFile? = null
+    ): String {
         val sourceName = target.file.name.orEmpty()
         val baseNumber = info.number.ifBlank { fallbackNumber }.uppercase()
         val variant = detectMovieVariant(sourceName)
         val writeInfo = info.copy(number = baseNumber)
         val distinctSuffix = if (forceDistinct) target.file.name.orEmpty().distinctPickcodeSuffix() else null
         val baseName = buildMovieBaseName(writeInfo, baseNumber) + distinctSuffix.orEmpty()
-        val movieDirectory = if (target.directory.name == baseName) {
-            target.directory
-        } else {
-            val actorDirectory = createOrReuseActorDirectory(target.directory, writeInfo)
-            createOrReuseMovieDirectory(actorDirectory, baseName)
+        val destinationParent = outputRoot ?: target.directory
+        val reuseSourceDirectory = outputRoot == null || outputRoot.uri == target.directory.uri
+        /*
+         * ================================================================================
+         * 步骤1：并发安全地准备影片目录
+         * ================================================================================
+         * 目标：允许刮削网络请求并发，同时避免 SAF 下重复创建演员或影片目录。
+         * 数据源：刮削结果、影片库根目录和当前 STRM 所在目录。
+         * 操作：
+         * 1) 只锁目录查找/创建这一小段本地操作。
+         * 2) 网络刮削、图片下载和文件写入不受该锁阻塞。
+         */
+        val movieDirectory = libraryDirectoryMutex.withLock {
+            if (reuseSourceDirectory && target.directory.name == baseName) {
+                target.directory
+            } else {
+                val actorDirectory = createOrReuseActorDirectory(destinationParent, writeInfo)
+                createOrReuseMovieDirectory(actorDirectory, baseName)
+            }
         }
+        logStore.append("影片目录准备完成：${movieDirectory.name}")
 
         logStore.append("Movie directory: ${movieDirectory.name}")
 
@@ -622,52 +876,458 @@ class StrmScrapeRepository(
         writeTextFile(directory, nfoName, NfoWriter.build(writeInfo))
         logStore.append("NFO rewritten: $nfoName")
 
+        /*
+         * ================================================================================
+         * 步骤7：替换重新刮削后的影片图片
+         * ================================================================================
+         * 目标：重新刮削纠正番号或资料源后，NFO 与封面、缩略图、背景图保持同一部影片。
+         * 数据源：本次融合后的 posterUrl、thumbUrl 和当前影片目录。
+         * 操作：
+         * 1) 仅在新图片地址存在时覆盖同名图片，避免空字段删除原图。
+         * 2) 下载成功后再删除旧文件并写入，保留网络失败时的原图片。
+         */
+        logStore.append("开始刷新重新刮削图片：$baseName")
         val posterName = "$baseName-poster.jpg"
         val thumbName = "$baseName-thumb.jpg"
         val fanartName = "$baseName-fanart.jpg"
-        val hasPoster = directory.hasAnyFile(posterName, "poster.jpg", "movie-poster.jpg")
-        val hasThumb = directory.hasAnyFile(thumbName, "thumb.jpg")
-        val hasFanart = directory.hasAnyFile(fanartName, "fanart.jpg", "movie-fanart.jpg")
-        if (hasPoster && hasThumb && hasFanart) {
-            logStore.append("poster/thumb/fanart already exist; skipped image downloads")
-            deleteLegacyNfoXml(target)
-            return
-        }
-
         val imageReferer = info.imageReferer()
         val poster = info.posterUrl.ifBlank { info.thumbUrl }
-        if (!hasPoster && poster.isNotBlank()) {
-            logStore.append("Poster missing; downloading: $poster")
+        if (poster.isNotBlank()) {
+            logStore.append("Refresh poster: $poster")
             tryDownloadImageToFile(directory, posterName, poster, imageReferer, "Poster")
+        } else {
+            logStore.append("Poster URL is blank; keeping existing poster")
         }
-        if (!hasThumb && info.thumbUrl.isNotBlank()) {
-            logStore.append("Thumb missing; downloading: ${info.thumbUrl}")
+        if (info.thumbUrl.isNotBlank()) {
+            logStore.append("Refresh thumb: ${info.thumbUrl}")
             tryDownloadImageToFile(directory, thumbName, info.thumbUrl, imageReferer, "Thumb")
-        }
-        if (!hasFanart && info.thumbUrl.isNotBlank()) {
-            logStore.append("Fanart missing; using thumb: $fanartName")
             tryDownloadImageToFile(directory, fanartName, info.thumbUrl, imageReferer, "Fanart")
+        } else {
+            logStore.append("Thumb URL is blank; keeping existing thumb and fanart")
         }
+        logStore.append("重新刮削图片刷新完成：$baseName")
         deleteLegacyNfoXml(target)
     }
 
-    private suspend fun downloadActorAvatars(info: ScrapedMovieInfo) {
-        if (info.actorImageUrls.isEmpty()) return
+    private suspend fun downloadActorAvatars(
+        info: ScrapedMovieInfo,
+        allowDmmName: Boolean = true,
+        allowJavdbAliases: Boolean = true,
+        allowJavlibraryAliases: Boolean = true,
+        allowSourceImages: Boolean = true,
+        allowGfriends: Boolean = settingsRepository.isGfriendsActorAvatarEnabled(),
+        forceRefresh: Boolean = false,
+        reuseMergedActorIdentities: Boolean = false
+    ): Map<String, List<String>> {
+        /*
+         * ================================================================================
+         * 步骤8：补齐演员头像
+         * ================================================================================
+         * 目标：打通 DMM/FANZA 官方头像、当前资料源和 Fusion 的 gfriends 头像库。
+         * 数据源：当前影片演员列表、资料源头像、DMM2 GraphQL 和 gfriends Filetree.json。
+         * 操作：
+         * 1) 已存在本地头像的演员不重复下载。
+         * 2) 先按当前演员名查询 DMM/FANZA 官方头像。
+         * 3) 未命中时查询 JavDB、JavLibrary 对应影片演员名，再按别名回查 DMM/FANZA。
+         * 4) 最后尝试当前资料源头像和 gfriends 兜底。
+         */
+        val actorNames = info.actors
+            .map { it.trim() }
+            .filter { actor -> actor.isNotBlank() && !isNonActorCategoryName(actor.primaryActorName()) }
+            .distinctBy { it.normalizedActorName() }
+        if (actorNames.isEmpty()) return emptyMap()
+
+        logStore.append("开始补齐演员头像：${actorNames.size} 人")
         val imageReferer = info.imageReferer()
-        info.actorImageUrls.forEach { (actorName, imageUrl) ->
-            if (actorName.isBlank() || imageUrl.isBlank()) return@forEach
-            if (actorAvatarStore.hasAvatar(actorName)) {
-                logStore.append("Actor avatar already exists; skipped: $actorName")
-                return@forEach
+        var downloaded = 0
+        var changed = false
+        var javdbActorsLoaded = false
+        var javdbActors = emptyList<ActorAliasLookup>()
+        var javlibraryActorsLoaded = false
+        var javlibraryActors = emptyList<ActorAliasLookup>()
+        val resolvedActorAliases = mutableMapOf<String, List<String>>()
+        if (reuseMergedActorIdentities) {
+            logStore.append("Reuse merged actor identities for avatar aliases: ${info.number}")
+        }
+
+        fun ScrapedMovieInfo.toActorAliasLookups(): List<ActorAliasLookup> = actors.mapNotNull { rawActor ->
+            val name = rawActor.trim()
+            if (name.isBlank()) return@mapNotNull null
+            val aliases = actorAliases
+                .filterKeys { storedActor -> storedActor.sameActorExactly(name) }
+                .values
+                .flatten()
+                .flatMap(::actorNameParts)
+                .filter { alias -> alias.isNotBlank() && !alias.sameActorExactly(name) }
+                .distinctBy { alias -> alias.normalizedActorName() }
+            ActorAliasLookup(name = name, aliases = aliases)
+        }
+
+        fun ActorAliasLookup.allNames(): List<String> = (listOf(name) + aliases)
+            .flatMap(::actorNameParts)
+            .filter { candidate -> candidate.isNotBlank() && !isNonActorCategoryName(candidate) }
+            .distinctBy { candidate -> candidate.normalizedActorName() }
+
+        suspend fun loadJavdbActors(): List<ActorAliasLookup> {
+            if (javdbActorsLoaded) return javdbActors
+            javdbActorsLoaded = true
+            if (!allowJavdbAliases || info.number.isBlank()) return emptyList()
+            if (reuseMergedActorIdentities || info.source.equals("javdb", ignoreCase = true)) {
+                javdbActors = info.toActorAliasLookups()
+                return javdbActors
             }
-            runCatching {
-                logStore.append("Download actor avatar: $actorName -> $imageUrl")
-                actorAvatarStore.saveAvatar(actorName, imageDownloadService.downloadImageBytes(imageUrl, imageReferer))
-                logStore.append("Actor avatar downloaded: $actorName")
+            javdbActors = runCatching {
+                withTimeout(WEBVIEW_ALIAS_TIMEOUT_MS) {
+                    javdbScraper.findActors(info.number)
+                }
             }.onFailure { error ->
-                logStore.append("Actor avatar download failed: $actorName, ${error.message ?: error::class.java.simpleName}")
+                if (error is CancellationException && error !is TimeoutCancellationException) throw error
+                logStore.append("JavDB 演员别名回查失败：${info.number}，${error.message ?: error::class.java.simpleName}")
+            }.getOrDefault(emptyList())
+            return javdbActors
+        }
+
+        suspend fun loadJavlibraryActors(): List<ActorAliasLookup> {
+            if (javlibraryActorsLoaded) return javlibraryActors
+            javlibraryActorsLoaded = true
+            if (!allowJavlibraryAliases || info.number.isBlank()) return emptyList()
+            if (reuseMergedActorIdentities || info.source.equals("javlibrary", ignoreCase = true)) {
+                javlibraryActors = info.toActorAliasLookups()
+                return javlibraryActors
+            }
+            javlibraryActors = runCatching {
+                withTimeout(WEBVIEW_ALIAS_TIMEOUT_MS) {
+                    javlibraryScraper.findActors(info.number)
+                }
+            }.onFailure { error ->
+                if (error is CancellationException && error !is TimeoutCancellationException) throw error
+                logStore.append("JavLibrary 演员别名回查失败：${info.number}，${error.message ?: error::class.java.simpleName}")
+            }.getOrDefault(emptyList())
+            return javlibraryActors
+        }
+
+        suspend fun loadExternalActorNamesFor(
+            actorName: String,
+            persistedAliases: Collection<String>
+        ): List<String> {
+            val knownNames = (actorNameParts(actorName) + persistedAliases.flatMap(::actorNameParts))
+                .filter { candidate -> candidate.isNotBlank() && !isNonActorCategoryName(candidate) }
+                .distinctBy { candidate -> candidate.normalizedActorName() }
+            return listOf(loadJavdbActors(), loadJavlibraryActors())
+                .flatMap { sourceActors ->
+                    val matchedActors = sourceActors.filter { externalActor ->
+                        externalActor.allNames().any { externalName ->
+                            knownNames.any { knownName -> knownName.sameActorExactly(externalName) }
+                        }
+                    }
+                    matchedActors.flatMap { externalActor -> externalActor.allNames() }
+                }
+                .filter { candidate -> candidate.isNotBlank() }
+                .distinctBy { candidate -> candidate.normalizedActorName() }
+        }
+
+        fun actorImageCandidates(sourceInfo: ScrapedMovieInfo, actorName: String): List<String> {
+            val identityNames = actorNameParts(actorName) + sourceInfo.actorAliases
+                .filterKeys { storedActor -> storedActor.sameActorExactly(actorName) }
+                .values
+                .flatten()
+                .flatMap(::actorNameParts)
+            return sourceInfo.actorImageUrls.entries
+                .filter { (name, url) ->
+                    url.isNotBlank() && identityNames.any { identity -> name.sameActorExactly(identity) }
+                }
+                .flatMap { (_, url) -> dmmFanzaActorImageCandidates(url) }
+                .distinct()
+        }
+
+        actorNames.forEach { actorName ->
+            val existingAvatar = actorAvatarStore.hasAvatar(actorName)
+            var saved = existingAvatar && !forceRefresh
+            var aliasesCopied = 0
+            var resolvedAliases: List<String>? = null
+
+            suspend fun loadActorAliases(): List<String> {
+                resolvedAliases?.let { return it }
+                val primaryName = actorName.primaryActorName()
+                val persistedAliases = info.actorAliases
+                    .filterKeys { savedActor -> savedActor.sameActorExactly(actorName) }
+                    .values
+                    .flatten()
+                resolvedAliases = (actorNameParts(actorName).drop(1) + persistedAliases +
+                    loadExternalActorNamesFor(actorName, persistedAliases))
+                    .flatMap(::actorNameParts)
+                    .filter { alias ->
+                        alias.isNotBlank() &&
+                            !isNonActorCategoryName(alias) &&
+                            !alias.sameActorExactly(primaryName)
+                    }
+                    .distinctBy { alias -> alias.normalizedActorName() }
+                return resolvedAliases.orEmpty()
+            }
+
+            /*
+             * ================================================================================
+             * 步骤8.1：强制重匹配前清理历史缓存
+             * ================================================================================
+             * 目标：头像源变更或身份纠错后，不让旧头像继续遮蔽新结果。
+             * 数据源：当前演员名、资料源返回的别名和 ActorAvatarStore 本地缓存。
+             * 操作：
+             * 1) 先收集本轮可确认的别名。
+             * 2) 删除主名及别名的旧头像，再从本轮来源重新下载。
+             */
+            if (forceRefresh) {
+                val staleNames = (listOf(actorName) + loadActorAliases())
+                    .flatMap(::actorNameParts)
+                    .filter { name -> name.isNotBlank() && !isNonActorCategoryName(name) }
+                    .distinctBy { name -> name.normalizedActorName() }
+                val cleared = staleNames.sumOf { name -> actorAvatarStore.clearAvatar(name) }
+                if (cleared > 0) {
+                    changed = true
+                    logStore.append("Cleared stale actor avatars: $actorName, count=$cleared")
+                }
+                saved = false
+            }
+
+            fun copyExistingAvatarToAliases(aliasNames: Collection<String>, sourceLabel: String) {
+                if (!actorAvatarStore.hasAvatar(actorName) || aliasNames.isEmpty()) return
+                val copied = actorAvatarStore.copyAvatarToNames(
+                    sourceActorName = actorName,
+                    aliasNames = aliasNames,
+                    overwriteExisting = forceRefresh
+                )
+                if (copied > 0) {
+                    aliasesCopied += copied
+                    changed = true
+                    logStore.append("Actor avatar aliases saved: $actorName, source=$sourceLabel, count=$copied")
+                }
+            }
+
+            if (existingAvatar) {
+                logStore.append(
+                    if (forceRefresh) "Actor avatar exists; re-matching: $actorName"
+                    else "Actor avatar exists; checking aliases: $actorName"
+                )
+            }
+
+            suspend fun tryDownload(
+                imageUrl: String,
+                sourceLabel: String,
+                referer: String? = imageReferer,
+                aliasNames: Collection<String> = emptyList()
+            ) {
+                runCatching {
+                    logStore.append("Download actor avatar: $actorName, source=$sourceLabel")
+                    val bytes = imageDownloadService.downloadImageBytes(imageUrl, referer)
+                    val namesToSave = (listOf(actorName) + aliasNames)
+                        .flatMap { name -> actorNameVariants(name) }
+                        .distinct()
+                    namesToSave.forEach { name -> actorAvatarStore.saveAvatar(name, bytes) }
+                    saved = true
+                    changed = true
+                    downloaded += 1
+                    logStore.append("Actor avatar downloaded: $actorName, source=$sourceLabel")
+                }.onFailure { error ->
+                    logStore.append("Actor avatar download failed: $actorName, ${error.message ?: error::class.java.simpleName}")
+                }
+            }
+
+            /*
+             * ================================================================================
+             * 步骤8：优先使用当前详情页绑定的演员头像
+             * ================================================================================
+             * 目标：避免 DMM/FANZA 按姓名回查时把同片其它演员的头像绑定到当前演员。
+             * 数据源：本轮详情页按演员姓名返回的头像 URL。
+             * 操作：
+             * 1) 先使用已经和演员姓名绑定的图片地址。
+             * 2) 强制重匹配时覆盖旧缓存，修复历史错配头像。
+             */
+            if (!saved && allowSourceImages) {
+                actorImageCandidates(info, actorName).forEach { url ->
+                    if (!saved) tryDownload(url, info.source.ifBlank { "metadata" })
+                }
+            }
+
+            // 8.1 直接按当前演员名查询 DMM/FANZA 官方头像，作为详情页图片不可用时的回退。
+            if (allowDmmName) {
+                runCatching {
+                    withTimeout(DMM_FANZA_AVATAR_TIMEOUT_MS) {
+                        dmm2Scraper.findActorImageByName(actorName)
+                    }
+                }.onFailure { error ->
+                    if (error is CancellationException && error !is TimeoutCancellationException) throw error
+                    logStore.append("DMM/FANZA 演员名回查失败：$actorName，${error.message ?: error::class.java.simpleName}")
+                }.getOrNull()?.let { official ->
+                    copyExistingAvatarToAliases(listOf(official.name), "DMM/FANZA:${official.name}")
+                    dmmFanzaActorImageCandidates(official.imageUrl).forEach { url ->
+                        if (!saved) {
+                            tryDownload(
+                                url,
+                                "DMM/FANZA:${official.name}",
+                                referer = null,
+                                aliasNames = listOf(official.name)
+                            )
+                        }
+                    }
+                }
+            }
+
+            // 8.2 用 JavDB、JavLibrary 影片演员名补齐本地头像别名，缺头像时再回查 DMM/FANZA。
+            if (allowJavdbAliases || allowJavlibraryAliases) {
+                val aliases = loadActorAliases()
+                if (aliases.isNotEmpty()) {
+                    resolvedActorAliases[actorName] = aliases
+                }
+                aliases
+                    .asSequence()
+                    .forEach { alias ->
+                        copyExistingAvatarToAliases(listOf(alias), "JavDB/JavLibrary:$alias")
+                        if (saved) return@forEach
+                        runCatching {
+                            withTimeout(DMM_FANZA_AVATAR_TIMEOUT_MS) {
+                                dmm2Scraper.findActorImageByName(alias)
+                            }
+                        }.onFailure { error ->
+                            if (error is CancellationException && error !is TimeoutCancellationException) throw error
+                            logStore.append("DMM/FANZA 别名回查失败：$alias，${error.message ?: error::class.java.simpleName}")
+                        }.getOrNull()?.let { official ->
+                            copyExistingAvatarToAliases(listOf(alias, official.name), "DMM/FANZA 别名:$alias")
+                            dmmFanzaActorImageCandidates(official.imageUrl).forEach { url ->
+                                if (!saved) {
+                                    tryDownload(
+                                        url,
+                                        "DMM/FANZA 别名:$alias",
+                                        referer = null,
+                                        aliasNames = listOf(alias, official.name)
+                                    )
+                                }
+                            }
+                        }
+                    }
+            }
+
+            // 8.3 所有网络资料源都不可用时，最后查询 Fusion 的 gfriends 头像库。
+            if (!saved && allowGfriends) {
+                val gfriendsUrl = runCatching { gfriendsActorAvatarRepository.findAvatar(actorName) }
+                    .onFailure { error ->
+                        logStore.append("gfriends 演员头像查询失败：$actorName，${error.message ?: error::class.java.simpleName}")
+                    }
+                    .getOrNull()
+                gfriendsUrl?.takeIf { it.isNotBlank() }?.let { url ->
+                    tryDownload(url, "gfriends", referer = null)
+                }
+            }
+            if ((allowJavdbAliases || allowJavlibraryAliases) && saved) {
+                copyExistingAvatarToAliases(
+                    loadActorAliases(),
+                    "JavDB/JavLibrary"
+                )
+            }
+            if (!saved && aliasesCopied == 0) {
+                logStore.append("Actor avatar unavailable: $actorName")
             }
         }
+        if (changed) {
+            _actorAvatarUpdateState.update { state ->
+                state.copy(refreshVersion = state.refreshVersion + 1)
+            }
+        }
+        logStore.append("演员头像补齐完成：$downloaded/${actorNames.size}")
+        return resolvedActorAliases
+    }
+
+    private fun ScrapedMovieInfo.withResolvedActorAliases(
+        resolvedAliases: Map<String, List<String>>
+    ): ScrapedMovieInfo {
+        val mergedAliases = actorAliases.toMutableMap()
+        resolvedAliases.forEach { (actor, aliases) ->
+            val primaryName = actor.primaryActorName()
+            mergedAliases[actor] = (mergedAliases[actor].orEmpty() + aliases)
+                .flatMap(::actorNameParts)
+                .filter { alias ->
+                    alias.isNotBlank() &&
+                        !isNonActorCategoryName(alias) &&
+                    !alias.sameActorExactly(primaryName) &&
+                    excludedActorNames.none { excluded -> alias.sameActorExactly(excluded) }
+                }
+                .distinctBy { alias -> alias.normalizedActorName() }
+        }
+        return copy(actorAliases = mergedAliases.filterValues { it.isNotEmpty() })
+            .canonicalizeActorIdentities()
+    }
+
+    private fun ScrapedMovieInfo.withLibraryActors(libraryActors: List<String>): ScrapedMovieInfo {
+        if (libraryActors.isEmpty()) return this
+
+        /*
+         * ================================================================================
+         * 步骤9：限制影片库旧演员只做已确认的查询提示
+         * ================================================================================
+         * 目标：避免旧 Room/NFO 演员污染本轮新资料，尤其是同番号曾误命中的演员。
+         * 数据源：本轮资料演员、显式别名和影片库旧演员显示名。
+         * 操作：
+         * 1) 本轮已有演员时，只保留能精确对应当前身份的旧姓名片段。
+         * 2) 本轮没有演员时，才允许旧演员作为头像查询种子。
+         * 3) 不把未确认的旧姓名写回当前 NFO。
+         */
+        val currentIdentityNames = if (actors.isEmpty()) {
+            emptyList()
+        } else {
+            (actors.flatMap(::actorNameParts) +
+                actorAliases.keys.flatMap(::actorNameParts) +
+                actorAliases.values.flatten().flatMap(::actorNameParts))
+                .filterNot(::isNonActorCategoryName)
+                .distinctBy { it.normalizedActorName() }
+        }
+        val lookupActors = if (actors.isEmpty()) {
+            libraryActors
+        } else {
+            libraryActors.flatMap { rawActor ->
+                actorNameParts(rawActor).filter { part ->
+                    currentIdentityNames.any { current -> actorNamesHaveExactVariant(current, part) }
+                }
+            }
+        }
+        if (lookupActors.isEmpty()) {
+            logStore.append("Skip unconfirmed library actors for avatar lookup: $number")
+            return this
+        }
+
+        val mergedInfo = withSupplementalActors(lookupActors)
+        if (mergedInfo.actors == actors && mergedInfo.actorAliases == actorAliases) return this
+        logStore.append(
+            "Merge library actors for avatar lookup: $number, " +
+                "metadata=${actors.size}, merged=${mergedInfo.actors.size}"
+        )
+        return mergedInfo
+    }
+
+    private suspend fun ScrapedMovieInfo.withExternalActorsWhenMissing(number: String): ScrapedMovieInfo {
+        if (actors.isNotEmpty()) return this
+        logStore.append("Metadata and library actors empty; query JavLibrary/JavDB: $number")
+        val external = runCatching {
+            scraperRegistry.scrapeWithFallback(
+                preferred = ScrapeSource.Javlibrary,
+                number = number,
+                fallbackOrder = listOf(ScrapeSource.Javdb, ScrapeSource.Javbus),
+                collectAllSources = true
+            )
+        }.onFailure { error ->
+            if (error is CancellationException) throw error
+            logStore.append("External actor lookup failed: $number, ${error.message ?: error::class.java.simpleName}")
+        }.getOrNull() ?: return this
+        if (external.actors.isEmpty()) {
+            logStore.append("External actor lookup returned no actors: $number")
+            return this
+        }
+        logStore.append("External actors found: $number, count=${external.actors.size}")
+        return copy(
+            actors = external.actors,
+            actorAliases = external.actorAliases,
+            excludedActorNames = external.excludedActorNames,
+            actorImageUrls = external.actorImageUrls,
+            website = website.ifBlank { external.website },
+            source = source.ifBlank { external.source }
+        )
     }
 
     private fun buildMovieBaseName(info: ScrapedMovieInfo, fallbackNumber: String): String {
@@ -874,10 +1534,6 @@ class StrmScrapeRepository(
         }
     }
 
-    private fun DocumentFile.hasAnyFile(vararg names: String): Boolean {
-        return names.any { name -> findFile(name) != null }
-    }
-
     private fun deleteRecursively(file: DocumentFile) {
         if (file.isDirectory) {
             file.listFiles().forEach { deleteRecursively(it) }
@@ -897,15 +1553,18 @@ class StrmScrapeRepository(
         return "_${token.take(8)}"
     }
 
-    private fun String.normalizedActorName(): String = trim().lowercase()
+    private fun String.normalizedActorName(): String = actorNameVariants(this).firstOrNull().orEmpty()
 
-    private fun String.sameActor(other: String): Boolean =
-        normalizedActorName() == other.normalizedActorName()
+    private fun String.sameActorExactly(other: String): Boolean =
+        actorNamesHaveExactVariant(this, other)
 
     private fun ScrapedMovieInfo.imageReferer(): String? {
         return website
-            .takeIf { source.equals("javbus", ignoreCase = true) }
-            ?.takeIf { it.startsWith(JAVBUS_BASE_URL, ignoreCase = true) }
+            .takeIf {
+                (source.equals("javbus", ignoreCase = true) && it.startsWith(JAVBUS_BASE_URL, ignoreCase = true)) ||
+                    (source.equals("javdb", ignoreCase = true) && it.startsWith(JAVDB_BASE_URL, ignoreCase = true)) ||
+                    (source.equals("javlibrary", ignoreCase = true) && it.startsWith(JAVLIBRARY_BASE_URL, ignoreCase = true))
+            }
     }
 
     private fun DocumentFile.isExcludedAssetDirectory(): Boolean {
@@ -926,6 +1585,8 @@ class StrmScrapeRepository(
             ScrapeSource.Dmm2 -> "DMM2"
             ScrapeSource.Official -> "Official"
             ScrapeSource.Javbus -> "JavBus"
+            ScrapeSource.Javdb -> "JavDB"
+            ScrapeSource.Javlibrary -> "JavLibrary"
             ScrapeSource.Missav -> "MissAV"
         }
 
@@ -935,14 +1596,37 @@ class StrmScrapeRepository(
     private companion object {
         const val GENERIC_FILE_MIME_TYPE = "application/octet-stream"
         const val JAVBUS_BASE_URL = "https://www.javbus.com/"
+        const val JAVDB_BASE_URL = "https://javdb.com/"
+        const val JAVLIBRARY_BASE_URL = "https://www.javlibrary.com/"
+        /**
+         * ================================================================================
+         * 步骤1：定义全库演员资料源顺序
+         * ================================================================================
+         * 目标：全库头像任务统一融合所有非 MissAV 的影片资料源。
+         * 数据源：DMM/FANZA、JavDB、JavLibrary、JavBus、旧 DMM 和厂商官网。
+         * 操作：
+         * 1) DMM2 保持首源，由调用方单独传入。
+         * 2) 后续来源按别名质量、演员图片可用性和兼容性依次补齐。
+         */
+        val ACTOR_AVATAR_METADATA_FALLBACK_ORDER = listOf(
+            ScrapeSource.Javdb,
+            ScrapeSource.Javlibrary,
+            ScrapeSource.Javbus,
+            ScrapeSource.Dmm,
+            ScrapeSource.Official
+        )
         const val SCRAPE_QUEUE_POLL_INTERVAL_MS = 250L
+        const val DMM_FANZA_AVATAR_TIMEOUT_MS = 8_000L
+        const val WEBVIEW_ALIAS_TIMEOUT_MS = 75_000L
     }
 }
 
 data class ActorAvatarUpdateResult(
     val totalMissing: Int,
     val downloaded: Int,
-    val scrapedMovies: Int
+    val scrapedMovies: Int,
+    val totalActors: Int = totalMissing,
+    val forceRefresh: Boolean = false
 )
 
 data class ScrapedMovieWriteResult(

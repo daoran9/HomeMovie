@@ -5,6 +5,8 @@ enum class ScrapeSource {
     Dmm2,
     Official,
     Javbus,
+    Javdb,
+    Javlibrary,
     Missav
 }
 
@@ -22,6 +24,9 @@ data class ScrapedMovieInfo(
     val series: String = "",
     val directors: List<String> = emptyList(),
     val actors: List<String> = emptyList(),
+    val actorAliases: Map<String, List<String>> = emptyMap(),
+    /** 资料源明确标记为男性或其它非演员身份的姓名，禁止并入女演员列表。 */
+    val excludedActorNames: List<String> = emptyList(),
     val actorImageUrls: Map<String, String> = emptyMap(),
     val genres: List<String> = emptyList(),
     val tags: List<String> = emptyList(),
@@ -31,6 +36,11 @@ data class ScrapedMovieInfo(
     val source: String = "",
     val thumbUrl: String = "",
     val posterUrl: String = ""
+)
+
+data class ActorAliasLookup(
+    val name: String,
+    val aliases: List<String> = emptyList()
 )
 
 data class ScrapeRunResult(
