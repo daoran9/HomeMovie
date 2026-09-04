@@ -4,7 +4,9 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
+import com.example.localmovielibrary.cloud115.Cloud115Client
 import com.example.localmovielibrary.data.local.CloudStrmRecordDao
 import com.example.localmovielibrary.data.local.CloudStrmRecordEntity
 import com.example.localmovielibrary.data.local.MovieDao
@@ -33,7 +35,8 @@ class MovieRepository(
     private val movieDao: MovieDao,
     private val cloudStrmRecordDao: CloudStrmRecordDao,
     private val scanner: LibraryScanner,
-    private val contentResolver: ContentResolver
+    private val contentResolver: ContentResolver,
+    private val cloud115Client: Cloud115Client
 ) {
     fun observeMovies(): Flow<List<MovieEntity>> =
         movieDao.observeMovieListInvalidation()
@@ -550,30 +553,23 @@ class MovieRepository(
          * ================================================================================
          * 步骤1：从实际 STRM 内容构造播放源
          * ================================================================================
-         * 目标：显示 115 原始文件名，并排除旧索引中多个记录指向同一 pickcode 的重复源。
+         * 目标：保留每个数据库 pickcode 对应的播放源，并修复历史 STRM 的错误地址。
          * 数据源：每条 CloudStrmRecord 对应的 STRM 文本地址。
          * 操作：
-         * 1) 读取 STRM 中的真实 pickcode 和文件名。
-         * 2) 以真实 pickcode 去重，索引字段仅作为解析失败时的回退。
+         * 1) 数据库 pickcode 是播放源身份，STRM 内容只用于校验和读取旧名称。
+         * 2) 发现两者不一致时按记录 pickcode 修复 STRM，并补齐 115 文件大小。
          */
-        val parts = records
-            .asSequence()
-            .filter { it.strmUri.isNotBlank() }
-            .mapNotNull { record ->
-                val content = readStrmText(record.strmUri) ?: return@mapNotNull null
-                val source = parseStrmPlaybackSource(content)
-                val sourceFileName = source?.fileName ?: record.fileName
-                val sourceKey = (source?.pickcode ?: record.playbackRecordKey()).lowercase(Locale.ROOT)
-                MoviePlaybackPart(
-                    label = sourceFileName.playbackPartUiLabel(),
-                    videoUri = record.strmUri,
-                    fileName = sourceFileName,
-                    sourceKey = sourceKey
-                )
+        val parts = buildList {
+            records.filter { it.strmUri.isNotBlank() }.forEach { record ->
+                resolveIndexedPlaybackPart(record)?.let(::add)
             }
+        }
             .distinctBy { it.sourceKey }
-            .sortedWith(compareBy<MoviePlaybackPart> { it.label.playbackPartUiSortKey() }.thenBy { it.fileName.lowercase(Locale.ROOT) })
-            .toList()
+            .sortedWith(
+                compareBy<MoviePlaybackPart> { it.label.playbackPartUiSortKey() }
+                    .thenBy { it.fileName.lowercase(Locale.ROOT) }
+                    .thenBy { it.sourceKey }
+            )
         val labelCounts = parts.groupingBy { it.label }.eachCount()
         val labelOccurrences = mutableMapOf<String, Int>()
         return parts.map { part ->
@@ -584,12 +580,66 @@ class MovieRepository(
         }
     }
 
+    private suspend fun resolveIndexedPlaybackPart(record: CloudStrmRecordEntity): MoviePlaybackPart? {
+        val content = readStrmText(record.strmUri) ?: return null
+        val strmSource = parseStrmPlaybackSource(content)
+        val strmPickcode = strmSource?.pickcode
+        val pickcodeMismatch = strmPickcode?.equals(record.pickcode, ignoreCase = true) != true
+        val needsMetadata = pickcodeMismatch || record.sourceName.isNullOrBlank() || record.sourceSizeBytes == null
+        val metadata = if (needsMetadata) {
+            runCatching { cloud115Client.fetchVideoInfo(record.pickcode) }
+                .onFailure { error ->
+                    Log.i(TAG, "115播放源信息读取失败，pickcode=${record.pickcode}，原因=${error.message}")
+                }
+                .getOrNull()
+        } else {
+            null
+        }
+        val sourceName = metadata?.name
+            ?: record.sourceName
+            ?: strmSource?.fileName
+            ?: record.fileName
+        val sourceSizeBytes = metadata?.sizeBytes ?: record.sourceSizeBytes
+
+        if (metadata != null && (record.sourceName != sourceName || record.sourceSizeBytes != sourceSizeBytes)) {
+            cloudStrmRecordDao.upsert(
+                record.copy(
+                    sourceName = sourceName,
+                    sourceSizeBytes = sourceSizeBytes,
+                    updatedAt = System.currentTimeMillis()
+                )
+            )
+        }
+        if (pickcodeMismatch) {
+            val repairedContent = replaceStrmPlaybackSource(content, record.pickcode, sourceName) ?: return null
+            if (!writeStrmText(record.strmUri, repairedContent)) {
+                Log.i(TAG, "115播放源 STRM 修复失败，pickcode=${record.pickcode}")
+                return null
+            }
+            Log.i(TAG, "已修复历史 STRM 播放源，pickcode=${record.pickcode}")
+        }
+        return MoviePlaybackPart(
+            label = sourceName.playbackPartUiLabel(),
+            videoUri = record.strmUri,
+            fileName = sourceName,
+            sourceKey = record.pickcode.lowercase(Locale.ROOT),
+            sourceSizeBytes = sourceSizeBytes
+        )
+    }
+
     private fun readStrmText(uriString: String): String? =
         runCatching {
             contentResolver.openInputStream(Uri.parse(uriString))
                 ?.bufferedReader(Charsets.UTF_8)
                 ?.use { it.readText() }
         }.getOrNull()
+
+    private fun writeStrmText(uriString: String, content: String): Boolean =
+        runCatching {
+            contentResolver.openOutputStream(Uri.parse(uriString), "wt")?.bufferedWriter(Charsets.UTF_8)?.use { output ->
+                output.write(content)
+            } != null
+        }.getOrDefault(false)
 
     private fun canOpenUri(uriString: String): Boolean =
         runCatching {
@@ -882,7 +932,8 @@ data class MoviePlaybackPart(
     val label: String,
     val videoUri: String,
     val fileName: String,
-    val sourceKey: String = videoUri
+    val sourceKey: String = videoUri,
+    val sourceSizeBytes: Long? = null
 )
 
 internal data class StrmPlaybackSource(
@@ -910,11 +961,41 @@ internal fun parseStrmPlaybackSource(content: String): StrmPlaybackSource? {
     return StrmPlaybackSource(pickcode = pickcode, fileName = fileName)
 }
 
+/*
+ * ================================================================================
+ * 步骤2：恢复错误 STRM 的播放身份
+ * ================================================================================
+ * 目标：把历史文件中错误复用的 pickcode 改回数据库记录所属的播放源。
+ * 数据源：原 STRM 地址、记录 pickcode 和 115 返回的原文件名。
+ * 操作：
+ * 1) 仅替换 download_m3u、play、video_proxy 路由中的 pickcode 与文件名。
+ * 2) 保留地址基址、查询参数和 STRM 中的其他文本。
+ */
+internal fun replaceStrmPlaybackSource(content: String, pickcode: String, fileName: String): String? {
+    // 2.1 定位首条实际播放地址，空行和尾部内容保持原样。
+    val address = content.lineSequence().map(String::trim).firstOrNull { it.isNotBlank() } ?: return null
+    val match = STRM_PLAYBACK_SOURCE_PATTERN.find(address) ?: return null
+    val pickcodeRange = match.groups[1]?.range ?: return null
+    val fileNameRange = match.groups[2]?.range ?: return null
+    // 2.2 使用记录身份和官方文件名重组路径，避免继续播放另一条来源。
+    val repairedAddress = buildString {
+        append(address.substring(0, pickcodeRange.first))
+        append(pickcode)
+        append(address.substring(pickcodeRange.last + 1, fileNameRange.first))
+        append(encodeStrmPathSegment(fileName))
+        append(address.substring(fileNameRange.last + 1))
+    }
+    return content.replaceFirst(address, repairedAddress)
+}
+
 private val STRM_PLAYBACK_SOURCE_PATTERN =
     Regex("""(?i)(?:^|/)(?:download_m3u|play|video_proxy)/([^/?#]+)/([^?#\r\n]+)""")
 
 private fun decodeStrmPathSegment(value: String): String =
     java.net.URLDecoder.decode(value.replace("+", "%2B"), Charsets.UTF_8.name())
+
+private fun encodeStrmPathSegment(value: String): String =
+    java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
 data class DeleteMovieResult(
     val movieId: Long,
@@ -948,6 +1029,7 @@ private data class SimilarCodeInfo(val prefix: String, val number: Int)
 
 private const val SIMILAR_ACTOR_PREFILTER_LIMIT = 4
 private const val MOVIE_LIST_PAGE_SIZE = 80
+private const val TAG = "MovieRepository"
 
 private fun MovieEntity.similarCodeInfo(): SimilarCodeInfo? {
     val source = listOf(title, originalTitle.orEmpty(), videoName).joinToString(" ")

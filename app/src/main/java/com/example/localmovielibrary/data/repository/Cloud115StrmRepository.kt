@@ -170,6 +170,8 @@ class Cloud115StrmRepository(
                 recordRepository.upsertGenerated(
                     pickcode = pickcode,
                     fileName = variantFile.name,
+                    sourceName = item.name,
+                    sourceSizeBytes = item.size,
                     strmUri = variantFile.uri,
                     libraryRootUri = settingsRepository.getLibraryRootUri()
                 )
@@ -200,6 +202,8 @@ class Cloud115StrmRepository(
                 recordRepository.upsertGenerated(
                     pickcode = pickcode,
                     fileName = standardFile.name,
+                    sourceName = item.name,
+                    sourceSizeBytes = item.size,
                     strmUri = standardFile.uri,
                     libraryRootUri = settingsRepository.getLibraryRootUri()
                 )
@@ -223,6 +227,8 @@ class Cloud115StrmRepository(
         recordRepository.upsertGenerated(
             pickcode = pickcode,
             fileName = file.name,
+            sourceName = item.name,
+            sourceSizeBytes = item.size,
             strmUri = file.uri,
             libraryRootUri = null
         )

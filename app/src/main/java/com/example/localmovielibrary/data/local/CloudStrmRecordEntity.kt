@@ -17,6 +17,8 @@ data class CloudStrmRecordEntity(
     @PrimaryKey
     val pickcode: String,
     val fileName: String,
+    val sourceName: String? = null,
+    val sourceSizeBytes: Long? = null,
     val movieNumber: String?,
     val variant: String?,
     val partLabel: String?,

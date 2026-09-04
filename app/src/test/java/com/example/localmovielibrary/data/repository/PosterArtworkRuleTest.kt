@@ -64,4 +64,30 @@ class PosterArtworkRuleTest {
         assertEquals("bd5h3bkwkk35g83ez", source?.pickcode)
         assertEquals("NAMH-056_restored iris+2.mp4", source?.fileName)
     }
+
+    /*
+     * ================================================================================
+     * 步骤3：验证错误播放源地址修复
+     * ================================================================================
+     * 目标：历史 STRM 指向另一条 pickcode 时，恢复数据库记录对应的视频。
+     * 数据源：错误的 download_m3u 地址和已保留的原始 pickcode。
+     * 操作：
+     * 1) 只替换播放路由中的 pickcode 与文件名。
+     * 2) 保留 STRM 地址的协议、主机和其他路径结构。
+     */
+    @Test
+    fun restoresRecordedPickcodeInCorruptStrmAddress() {
+        // 3.1 模拟旧版追加播放源时错误复用了第二条视频地址。
+        val repaired = replaceStrmPlaybackSource(
+            "http://127.0.0.1/download_m3u/bd5h3bkwkk35g83ez/NAMH-056_restored.mp4",
+            pickcode = "akwj9647lk7tnhtnz",
+            fileName = "NAMH-056_restored iris2.mp4"
+        )
+
+        // 3.2 修复后播放器从 STRM 解析到的是记录自身的 pickcode。
+        assertEquals(
+            "http://127.0.0.1/download_m3u/akwj9647lk7tnhtnz/NAMH-056_restored%20iris2.mp4",
+            repaired
+        )
+    }
 }

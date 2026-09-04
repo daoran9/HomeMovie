@@ -36,7 +36,8 @@ class AppContainer(context: Context) {
         MIGRATION_6_7,
         MIGRATION_7_8,
         MIGRATION_8_9,
-        MIGRATION_9_10
+        MIGRATION_9_10,
+        MIGRATION_10_11
     ).build()
 
     val scanner = LibraryScanner(appContext)
@@ -76,7 +77,8 @@ class AppContainer(context: Context) {
         movieDao = database.movieDao(),
         cloudStrmRecordDao = database.cloudStrmRecordDao(),
         scanner = scanner,
-        contentResolver = appContext.contentResolver
+        contentResolver = appContext.contentResolver,
+        cloud115Client = cloud115Client
     )
     val strmScrapeRepository = StrmScrapeRepository(
         context = appContext,
@@ -226,6 +228,13 @@ class AppContainer(context: Context) {
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_direct_links_expiresAt` ON `direct_links` (`expiresAt`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_playback_progress_updatedAt` ON `playback_progress` (`updatedAt`)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS `index_cloud_strm_records_movieNumber_partLabel_variant_fileName` ON `cloud_strm_records` (`movieNumber`, `partLabel`, `variant`, `fileName`)")
+            }
+        }
+
+        val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE cloud_strm_records ADD COLUMN sourceName TEXT")
+                db.execSQL("ALTER TABLE cloud_strm_records ADD COLUMN sourceSizeBytes INTEGER")
             }
         }
     }

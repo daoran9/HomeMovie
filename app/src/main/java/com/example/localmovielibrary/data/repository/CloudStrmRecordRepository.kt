@@ -59,6 +59,8 @@ class CloudStrmRecordRepository(
     suspend fun upsertGenerated(
         pickcode: String,
         fileName: String,
+        sourceName: String?,
+        sourceSizeBytes: Long?,
         strmUri: String,
         libraryRootUri: String?,
         movieId: Long? = null
@@ -70,6 +72,8 @@ class CloudStrmRecordRepository(
             CloudStrmRecordEntity(
                 pickcode = pickcode,
                 fileName = fileName,
+                sourceName = sourceName ?: existing?.sourceName,
+                sourceSizeBytes = sourceSizeBytes ?: existing?.sourceSizeBytes,
                 movieNumber = info?.number,
                 variant = detectMovieVariant(fileName).suffix.takeIf { it.isNotBlank() },
                 partLabel = info?.partLabel,

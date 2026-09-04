@@ -274,6 +274,46 @@ class Cloud115ApiClient(
         }
     }
 
+    /*
+     * ================================================================================
+     * 步骤1：按 pickcode 查询 115 视频信息
+     * ================================================================================
+     * 目标：恢复历史 STRM 损坏后丢失的原文件名和文件大小。
+     * 数据源：115 files/video 接口返回的 file_name、file_size。
+     * 操作：
+     * 1) 使用当前 115 Cookie 请求单个视频元信息。
+     * 2) 只返回详情页区分播放源所需的名称和大小。
+     */
+    override suspend fun fetchVideoInfo(pickcode: String): Cloud115VideoInfo = withContext(Dispatchers.IO) {
+        Log.i(TAG, "开始读取115视频信息，pickcode=$pickcode")
+        val cookies = cookieProvider.loadCookies()
+            ?: error("115 Cookie 未配置，请先到设置页填写 Cookie")
+        val request = Request.Builder()
+            .url("$VIDEO_INFO_URL?pickcode=$pickcode&share_id=0&local=1")
+            .get()
+            .header("Cookie", cookies)
+            .header("User-Agent", USER_AGENT)
+            .header("Accept", "application/json, text/plain, */*")
+            .build()
+        httpClient.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) error("115 视频信息读取失败：HTTP ${response.code}")
+            val json = JSONObject(response.body?.string().orEmpty())
+            if (json.has("state") && !json.optBoolean("state", false)) {
+                error(json.optString("error").ifBlank { json.optString("message", "115 视频信息读取失败") })
+            }
+            val data = json.optJSONObject("data") ?: json
+            val name = data.optString("file_name")
+                .ifBlank { data.optString("n") }
+                .takeIf { it.isNotBlank() }
+                ?: error("115 视频信息缺少文件名")
+            val size = data.optString("file_size")
+                .ifBlank { data.optString("s") }
+                .toLongOrNull()
+            Log.i(TAG, "115视频信息读取完成，pickcode=$pickcode，size=${size ?: -1}")
+            Cloud115VideoInfo(name = name, sizeBytes = size)
+        }
+    }
+
     private class FilesRequestException(
         val code: Int,
         message: String,
@@ -287,6 +327,7 @@ class Cloud115ApiClient(
         val RETRY_DELAYS_MS = longArrayOf(3_000L, 10_000L)
         const val FILES_URL = "https://webapi.115.com/files"
         const val APS_FILES_URL = "https://aps.115.com/natsort/files.php"
+        const val VIDEO_INFO_URL = "https://webapi.115.com/files/video"
         const val DOWNLOAD_URL = "https://proapi.115.com/app/chrome/downurl"
     }
 }

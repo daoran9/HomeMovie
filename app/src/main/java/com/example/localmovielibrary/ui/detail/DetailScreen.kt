@@ -90,9 +90,9 @@ import com.example.localmovielibrary.ui.shared.UriImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.json.JSONArray
+import java.util.Locale
 import java.text.SimpleDateFormat
 import java.util.Date
-import java.util.Locale
 
 private val DetailBackground = Color(0xFF101010)
 private val DetailPanel = Color(0xFF1B1B1B)
@@ -541,6 +541,11 @@ private fun MobileMainButtons(
                 onDismissRequest = { partMenuExpanded = false },
                 modifier = Modifier.background(DetailPanel)
             ) {
+                val repeatedSourceNames = playbackParts
+                    .groupingBy { it.fileName }
+                    .eachCount()
+                    .filterValues { it > 1 }
+                    .keys
                 playbackParts.forEach { part ->
                     DropdownMenuItem(
                         text = {
@@ -551,7 +556,7 @@ private fun MobileMainButtons(
                                     fontWeight = FontWeight.SemiBold
                                 )
                                 Text(
-                                    text = part.fileName,
+                                    text = part.playbackSourceDescription(part.fileName in repeatedSourceNames),
                                     color = DetailMuted,
                                     style = MaterialTheme.typography.labelSmall,
                                     maxLines = 1,
@@ -583,6 +588,31 @@ private fun MobileMainButtons(
             Text("预告片", fontWeight = FontWeight.Bold)
         }
     }
+}
+
+/*
+ * ================================================================================
+ * 步骤1：生成播放源区分文字
+ * ================================================================================
+ * 目标：同名的 115 视频仍能通过文件大小和 pickcode 区分。
+ * 数据源：播放源记录保存的原文件名、大小和 pickcode。
+ * 操作：
+ * 1) 所有播放源显示原文件名和已知大小。
+ * 2) 仅同名来源追加短 pickcode，避免菜单信息重复。
+ */
+private fun MoviePlaybackPart.playbackSourceDescription(showPickcode: Boolean): String = buildString {
+    // 1.1 文件大小为空时保留文件名，旧记录也能正常显示。
+    append(fileName)
+    sourceSizeBytes?.let { size -> append(" · ").append(formatPlaybackSourceSize(size)) }
+    // 1.2 同名视频追加稳定身份，防止不同大小来源看起来完全相同。
+    if (showPickcode) append(" · 115 ").append(sourceKey.takeLast(6))
+}
+
+private fun formatPlaybackSourceSize(bytes: Long): String = when {
+    bytes >= 1024L * 1024L * 1024L -> String.format(Locale.ROOT, "%.1f GB", bytes.toDouble() / (1024L * 1024L * 1024L))
+    bytes >= 1024L * 1024L -> String.format(Locale.ROOT, "%.1f MB", bytes.toDouble() / (1024L * 1024L))
+    bytes >= 1024L -> String.format(Locale.ROOT, "%.1f KB", bytes.toDouble() / 1024L)
+    else -> "$bytes B"
 }
 
 @Composable
