@@ -16,10 +16,17 @@ import java.util.Calendar
 import java.util.Locale
 import java.util.TimeZone
 
+internal const val DMM_EMPTY_SEARCH_RETRY_COUNT = 3
+internal const val DMM_EMPTY_SEARCH_RETRY_DELAY_MS = 750L
+
+internal fun shouldRetryDmmEmptySearchResult(attempt: Int): Boolean =
+    attempt < DMM_EMPTY_SEARCH_RETRY_COUNT - 1
+
 class Dmm2Scraper(
     private val client: OkHttpClient = OkHttpClient(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
-    private val logger: ((String) -> Unit)? = null
+    private val logger: ((String) -> Unit)? = null,
+    private val emptySearchRetryDelayMs: Long = DMM_EMPTY_SEARCH_RETRY_DELAY_MS
 ) : MovieScraper {
     override val source: ScrapeSource = ScrapeSource.Dmm2
 
@@ -39,13 +46,7 @@ class Dmm2Scraper(
          * 2) 从影片演员列表中保留姓名完全匹配的演员 ID。
          */
         logger?.invoke("DMM/FANZA 演员名回查：$query")
-        val searchJson = fetchSearch(query)
-        val contents = searchJson
-            .optJSONObject("data")
-            ?.optJSONObject("legacySearchPPV")
-            ?.optJSONObject("result")
-            ?.optJSONArray("contents")
-            ?: JSONArray()
+        val contents = searchContents(fetchSearch(query))
         val ids = (0 until contents.length())
             .flatMap { index ->
                 val actresses = contents.optJSONObject(index)?.optJSONArray("actresses") ?: return@flatMap emptyList()
@@ -85,13 +86,8 @@ class Dmm2Scraper(
     override suspend fun scrape(number: String): ScrapedMovieInfo = withContext(ioDispatcher) {
         val normalized = normalizeNumber(number)
         val keyword = normalizeNumberForSearch(normalized)
-        val searchJson = fetchSearch(keyword)
-        val contents = searchJson
-            .optJSONObject("data")
-            ?.optJSONObject("legacySearchPPV")
-            ?.optJSONObject("result")
-            ?.optJSONArray("contents")
-            ?: JSONArray()
+        val searchJson = fetchSearchWithContent(keyword)
+        val contents = searchContents(searchJson)
         logger?.invoke("DMM2 搜索返回：$keyword，结果 ${contents.length()} 条")
         if (contents.length() == 0) error("DMM2 没有搜索到结果：$normalized / $keyword")
         logSearchContents(keyword, contents)
@@ -135,6 +131,43 @@ class Dmm2Scraper(
             .toString()
         return postGraphql(payload, referer)
     }
+
+    /*
+     * ================================================================================
+     * 步骤1：重试 DMM/FANZA 的空影片搜索结果
+     * ================================================================================
+     * 目标：GraphQL 已成功返回但 contents 短暂为空时，不误判为该番号未上架。
+     * 数据源：DMM/FANZA legacySearchPPV 的同一严格番号查询。
+     * 操作：
+     * 1) 只重试影片番号搜索；演员姓名回查仍保持单次查询。
+     * 2) 任一次获得非空 contents 立即返回，不重试详情或改用模糊番号。
+     * 3) 最终仍为空才交给调用方报真实的未命中。
+     */
+    private suspend fun fetchSearchWithContent(keyword: String): JSONObject {
+        var lastSearch: JSONObject? = null
+        repeat(DMM_EMPTY_SEARCH_RETRY_COUNT) { attempt ->
+            // 1.1 保留本次成功 HTTP 响应，最终空结果仍需按原逻辑报未命中。
+            val search = fetchSearch(keyword)
+            lastSearch = search
+            if (searchContents(search).length() > 0) {
+                logger?.invoke("DMM2 空结果重试结束：$keyword，attempt=${attempt + 1}")
+                return search
+            }
+            logger?.invoke("DMM2 搜索暂时为空：$keyword，attempt=${attempt + 1}/$DMM_EMPTY_SEARCH_RETRY_COUNT")
+            if (shouldRetryDmmEmptySearchResult(attempt) && emptySearchRetryDelayMs > 0) {
+                // 1.2 不改变请求参数，只等待 DMM/FANZA 的短暂索引波动恢复。
+                delay(emptySearchRetryDelayMs)
+            }
+        }
+        return checkNotNull(lastSearch)
+    }
+
+    private fun searchContents(searchJson: JSONObject): JSONArray = searchJson
+        .optJSONObject("data")
+        ?.optJSONObject("legacySearchPPV")
+        ?.optJSONObject("result")
+        ?.optJSONArray("contents")
+        ?: JSONArray()
 
     private suspend fun fetchDetail(contentId: String): JSONObject {
         val payload = JSONObject()

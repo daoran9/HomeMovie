@@ -722,7 +722,6 @@ class MovieScraperRegistry(
     }
 
     private companion object {
-        const val JAVLIBRARY_ACTOR_AUTHORITY_SERIES = "MSAJ"
         val SAFE_METADATA_FALLBACK_SOURCES = setOf(
             ScrapeSource.Javlibrary,
             ScrapeSource.Javbus
@@ -739,12 +738,13 @@ class MovieScraperRegistry(
         const val WEBVIEW_SOURCE_TIMEOUT_MS = 70_000L
     }
 
-    private fun usesJavlibraryActorAuthority(number: String): Boolean =
-        extractMovieNumberInfo(number)
-            ?.number
-            ?.substringBefore('-')
-            ?.equals(JAVLIBRARY_ACTOR_AUTHORITY_SERIES, ignoreCase = true) == true
 }
+
+internal fun usesJavlibraryActorAuthority(number: String): Boolean =
+    extractMovieNumberInfo(number)
+        ?.number
+        ?.substringBefore('-')
+        ?.equals("MSAJ", ignoreCase = true) == true
 
 internal fun actorNamesMatch(left: String, right: String): Boolean =
     actorNameVariants(left).intersect(actorNameVariants(right)).isNotEmpty() ||

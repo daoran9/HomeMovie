@@ -40,6 +40,7 @@ import com.example.localmovielibrary.util.displayNumberWithVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
 import com.example.localmovielibrary.util.playbackSourceSuffix
 import com.example.localmovielibrary.scraper.primaryActorName
+import com.example.localmovielibrary.scraper.usesJavlibraryActorAuthority
 import com.example.localmovielibrary.scraper.withSupplementalActors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -329,10 +330,16 @@ class StrmScrapeRepository(
         } else {
             scraperRegistry.scrape(source, number)
         }
+        val refreshMsajActorAvatars = automaticPriority && usesJavlibraryActorAuthority(number)
+        if (refreshMsajActorAvatars) {
+            logStore.append("MSAJ 使用 JavLibrary 别名优先刷新官方头像：$number")
+        }
         val info = scrapedInfo.withResolvedActorAliases(
             downloadActorAvatars(
                 scrapedInfo,
                 allowExternalActorSources = !automaticPriority || scrapedInfo.source !in setOf("dmm2", "dmm"),
+                forceRefresh = refreshMsajActorAvatars,
+                preferKnownAliasesForDmm = refreshMsajActorAvatars,
                 reuseMergedActorIdentities = true
             )
         )
@@ -447,10 +454,16 @@ class StrmScrapeRepository(
         } else {
             scraperRegistry.scrape(source, number)
         }
+        val refreshMsajActorAvatars = automaticPriority && usesJavlibraryActorAuthority(number)
+        if (refreshMsajActorAvatars) {
+            logStore.append("MSAJ 使用 JavLibrary 别名优先刷新官方头像：$number")
+        }
         val info = scrapedInfo.withResolvedActorAliases(
             downloadActorAvatars(
                 scrapedInfo,
-                allowExternalActorSources = automaticPriority.not() || scrapedInfo.source !in setOf("dmm2", "dmm")
+                allowExternalActorSources = automaticPriority.not() || scrapedInfo.source !in setOf("dmm2", "dmm"),
+                forceRefresh = refreshMsajActorAvatars,
+                preferKnownAliasesForDmm = refreshMsajActorAvatars
             )
         )
         logStore.append("Rescrape metadata fetched: ${info.title.ifBlank { number }}")
@@ -537,10 +550,17 @@ class StrmScrapeRepository(
                         excludedSources = excludedSources
                     )
                 }
+                val refreshMsajActorAvatars = source != ScrapeSource.Missav &&
+                    usesJavlibraryActorAuthority(number)
+                if (refreshMsajActorAvatars) {
+                    logStore.append("MSAJ 使用 JavLibrary 别名优先刷新官方头像：$number")
+                }
                 val info = scrapedInfo.withResolvedActorAliases(
                     downloadActorAvatars(
                         scrapedInfo,
                         allowExternalActorSources = scrapedInfo.source !in setOf("dmm2", "dmm"),
+                        forceRefresh = refreshMsajActorAvatars,
+                        preferKnownAliasesForDmm = refreshMsajActorAvatars,
                         reuseMergedActorIdentities = true
                     )
                 )
@@ -989,7 +1009,8 @@ class StrmScrapeRepository(
         allowGfriends: Boolean = settingsRepository.isGfriendsActorAvatarEnabled(),
         forceRefresh: Boolean = false,
         reuseMergedActorIdentities: Boolean = false,
-        allowExternalActorSources: Boolean = true
+        allowExternalActorSources: Boolean = true,
+        preferKnownAliasesForDmm: Boolean = false
     ): Map<String, List<String>> {
         /*
          * ================================================================================
@@ -999,7 +1020,7 @@ class StrmScrapeRepository(
          * 数据源：当前影片演员列表、资料源头像、DMM2 GraphQL 和 gfriends Filetree.json。
          * 操作：
          * 1) 已存在本地头像的演员不重复下载。
-         * 2) 先按当前演员名及别名查询 DMM/FANZA 官方头像。
+         * 2) 默认先查当前演员名；MSAJ 已确认别名时先查别名。
          * 3) 未命中时按 JavDB、JavBus 的候选头像依次下载。
          * 4) 最后查询 Fusion 的 gfriends 头像库。
          */
@@ -1018,6 +1039,8 @@ class StrmScrapeRepository(
         var javlibraryActorsLoaded = false
         var javlibraryActors = emptyList<ActorAliasLookup>()
         val resolvedActorAliases = mutableMapOf<String, List<String>>()
+        val allowKnownAliasDmmLookup = preferKnownAliasesForDmm ||
+            (allowExternalActorSources && (allowJavdbAliases || allowJavlibraryAliases))
         if (reuseMergedActorIdentities) {
             logStore.append("Reuse merged actor identities for avatar aliases: ${info.number}")
         }
@@ -1213,62 +1236,66 @@ class StrmScrapeRepository(
                 }
             }
 
-            // 8.1 先按当前演员名查询 DMM/FANZA 官方头像。
-            if (allowDmmName) {
+            suspend fun downloadDmmAvatar(lookupName: String, sourceLabel: String) {
                 runCatching {
                     withTimeout(DMM_FANZA_AVATAR_TIMEOUT_MS) {
-                        dmm2Scraper.findActorImageByName(actorName)
+                        dmm2Scraper.findActorImageByName(lookupName)
                     }
                 }.onFailure { error ->
                     if (error is CancellationException && error !is TimeoutCancellationException) throw error
-                    logStore.append("DMM/FANZA 演员名回查失败：$actorName，${error.message ?: error::class.java.simpleName}")
+                    logStore.append("DMM/FANZA 演员名回查失败：$lookupName，${error.message ?: error::class.java.simpleName}")
                 }.getOrNull()?.let { official ->
-                    copyExistingAvatarToAliases(listOf(official.name), "DMM/FANZA:${official.name}")
+                    copyExistingAvatarToAliases(listOf(lookupName, official.name), sourceLabel)
                     dmmFanzaActorImageCandidates(official.imageUrl).forEach { url ->
                         if (!saved) {
                             tryDownload(
                                 url,
-                                "DMM/FANZA:${official.name}",
+                                sourceLabel,
                                 referer = null,
-                                aliasNames = listOf(official.name)
+                                aliasNames = listOf(lookupName, official.name)
                             )
                         }
                     }
                 }
             }
 
-            // 8.2 用 JavDB、JavLibrary 影片演员名补齐本地头像别名，再用别名回查 DMM/FANZA。
-            if (allowExternalActorSources && (allowJavdbAliases || allowJavlibraryAliases)) {
+            /*
+             * ================================================================================
+             * 步骤8.2：按已确认身份顺序回查 DMM/FANZA 头像
+             * ================================================================================
+             * 目标：MSAJ 用 JavLibrary 校准演员名后，优先使用其别名在官方库中的头像。
+             * 数据源：JavLibrary 已写入的 actorAliases 与 DMM/FANZA 演员姓名查询。
+             * 操作：
+             * 1) MSAJ 已确认别名先回查，保留用户偏好的官方历史艺名头像。
+             * 2) 其它影片仍先查主名，再用外部资料确认的别名补齐。
+             * 3) 所有查询均未命中时，才继续资料源图片和 gfriends 兜底。
+             */
+            val aliases = if (allowKnownAliasDmmLookup) {
                 val aliases = loadActorAliases()
                 if (aliases.isNotEmpty()) {
                     resolvedActorAliases[actorName] = aliases
                 }
                 aliases
-                    .asSequence()
-                    .forEach { alias ->
-                        copyExistingAvatarToAliases(listOf(alias), "JavDB/JavLibrary:$alias")
-                        if (saved) return@forEach
-                        runCatching {
-                            withTimeout(DMM_FANZA_AVATAR_TIMEOUT_MS) {
-                                dmm2Scraper.findActorImageByName(alias)
-                            }
-                        }.onFailure { error ->
-                            if (error is CancellationException && error !is TimeoutCancellationException) throw error
-                            logStore.append("DMM/FANZA 别名回查失败：$alias，${error.message ?: error::class.java.simpleName}")
-                        }.getOrNull()?.let { official ->
-                            copyExistingAvatarToAliases(listOf(alias, official.name), "DMM/FANZA 别名:$alias")
-                            dmmFanzaActorImageCandidates(official.imageUrl).forEach { url ->
-                                if (!saved) {
-                                    tryDownload(
-                                        url,
-                                        "DMM/FANZA 别名:$alias",
-                                        referer = null,
-                                        aliasNames = listOf(alias, official.name)
-                                    )
-                                }
-                            }
-                        }
+            } else {
+                emptyList()
+            }
+
+            if (preferKnownAliasesForDmm) {
+                aliases.forEach { alias ->
+                    if (!saved) {
+                        downloadDmmAvatar(alias, "DMM/FANZA 别名:$alias")
                     }
+                }
+            }
+            if (allowDmmName && !saved) {
+                downloadDmmAvatar(actorName, "DMM/FANZA:$actorName")
+            }
+            if (!preferKnownAliasesForDmm) {
+                aliases.forEach { alias ->
+                    if (!saved) {
+                        downloadDmmAvatar(alias, "DMM/FANZA 别名:$alias")
+                    }
+                }
             }
 
             /*
@@ -1306,7 +1333,7 @@ class StrmScrapeRepository(
                     tryDownload(url, "gfriends", referer = null)
                 }
             }
-            if (allowExternalActorSources && (allowJavdbAliases || allowJavlibraryAliases) && saved) {
+            if (allowKnownAliasDmmLookup && saved) {
                 copyExistingAvatarToAliases(
                     loadActorAliases(),
                     "JavDB/JavLibrary"
