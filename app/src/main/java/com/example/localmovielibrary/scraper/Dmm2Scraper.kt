@@ -23,6 +23,21 @@ internal const val DMM_EMPTY_SEARCH_RETRY_DELAY_MS = 750L
 internal fun shouldRetryDmmEmptySearchResult(attempt: Int): Boolean =
     attempt < DMM_EMPTY_SEARCH_RETRY_COUNT - 1
 
+/*
+ * ================================================================================
+ * 步骤1：转换 DMM/FANZA 片长
+ * ================================================================================
+ * 目标：把 DMM2 详情返回的秒数转换为 NFO 使用的分钟数。
+ * 数据源：PPVContent.duration。
+ * 操作：
+ * 1) 正数按分钟四舍五入。
+ * 2) 缺失或非正数保持空值，交给官方旧 DMM 字段补缺。
+ */
+internal fun dmmDurationToRuntimeMinutes(durationSeconds: Int): String =
+    durationSeconds.takeIf { it > 0 }
+        ?.let { ((it + 30) / 60).toString() }
+        .orEmpty()
+
 class Dmm2Scraper(
     private val client: OkHttpClient = OkHttpClient(),
     private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
@@ -154,6 +169,7 @@ class Dmm2Scraper(
         return JSONObject()
             .put("id", returnedId)
             .put("title", ppv.optString("title"))
+            .put("deliveryStartAt", ppv.optString("deliveryStartDate"))
             .put("review", data.optJSONObject("reviewSummary") ?: JSONObject())
     }
 
@@ -294,10 +310,15 @@ class Dmm2Scraper(
             .let { if (it == thumb) buildPosterUrl(thumb) else it }
             .cleanText()
 
-        val release = parseChinaDate(searchItem.optString("deliveryStartAt"))
+        val release = parseChinaDate(
+            ppv.optString("deliveryStartDate")
+                .ifBlank { searchItem.optString("deliveryStartAt") }
+        )
+        val runtime = dmmDurationToRuntimeMinutes(ppv.optInt("duration", 0))
         val tags = ppv.optJSONArray("genres").namesFromObjects()
         val actors = ppv.optJSONArray("actresses").namesFromObjects()
         val actorImageUrls = ppv.optJSONArray("actresses").imageUrlsByName()
+        val directors = ppv.optJSONArray("directors").namesFromObjects()
         val maker = ppv.optJSONObject("maker")?.optString("name").orEmpty().cleanText()
         val label = ppv.optJSONObject("label")?.optString("name").orEmpty().cleanText()
         val series = ppv.optJSONObject("series")?.optString("name").orEmpty().cleanText()
@@ -324,11 +345,11 @@ class Dmm2Scraper(
             outline = plot,
             year = Regex("""\d{4}""").find(release)?.value.orEmpty(),
             premiered = release,
-            runtime = "",
+            runtime = runtime,
             studio = maker,
             publisher = label,
             series = series,
-            directors = emptyList(),
+            directors = directors,
             actors = actors,
             actorImageUrls = actorImageUrls,
             genres = tags,
@@ -486,6 +507,8 @@ query Test(${'$'}id: ID!) {
     id
     title
     description
+    duration
+    deliveryStartDate
     notices
     announcements { body }
     floor
@@ -497,6 +520,7 @@ query Test(${'$'}id: ID!) {
     maker { id name }
     label { id name }
     series { id name }
+    directors { id name }
     genres { id name }
     actresses { id name imageUrl }
   }

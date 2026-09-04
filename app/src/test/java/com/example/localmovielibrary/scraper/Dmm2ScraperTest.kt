@@ -6,6 +6,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class Dmm2ScraperTest {
+    /*
+     * ================================================================================
+     * 步骤1：验证 DMM/FANZA 片长换算
+     * ================================================================================
+     * 目标：确保 DMM2 返回的 duration 能转换为 NFO 使用的分钟数。
+     * 数据源：DMM2 PPVContent.duration 秒数。
+     * 操作：
+     * 1) 按分钟四舍五入，避免详情页显示秒数。
+     * 2) 空值和非正数保持空字符串。
+     */
+    @Test
+    fun dmmDurationSecondsAreRoundedToMinutes() {
+        assertEquals("125", dmmDurationToRuntimeMinutes(7477))
+        assertEquals("", dmmDurationToRuntimeMinutes(0))
+        assertEquals("", dmmDurationToRuntimeMinutes(-1))
+    }
+
     @Test
     fun dmmFanzaActorImageCandidatesSwitchBetweenOfficialCdnHosts() {
         val awsUrl = "https://awsimgsrc.dmm.co.jp/pics_dig/mono/actjpgs/actor.jpg"
@@ -64,4 +81,5 @@ class Dmm2ScraperTest {
         assertTrue(isExactDmmContentId("msaj00002", "msaj00002"))
         assertFalse(isExactDmmContentId("1msaj00002", "msaj00002"))
     }
+
 }

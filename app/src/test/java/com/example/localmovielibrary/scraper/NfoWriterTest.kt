@@ -271,6 +271,38 @@ class NfoWriterTest {
         assertFalse(updated.contains("今井勇太"))
     }
 
+    /*
+     * ================================================================================
+     * 步骤1：删除当前资料未确认的旧演员块
+     * ================================================================================
+     * 目标：全库头像重匹配后不再保留旧番号误命中的 actor 块。
+     * 数据源：已有 NFO 和本轮非空演员结果。
+     * 操作：
+     * 1) 保留当前资料确认的演员。
+     * 2) 删除无法对应当前身份的旧演员块。
+     */
+    @Test
+    fun mergeActorDisplayNames_removesStaleActorBlockWhenCurrentActorsAreAvailable() {
+        val existingNfo = """
+            <movie>
+              <actor><name>旧演员</name></actor>
+              <actor><name>演员甲</name></actor>
+            </movie>
+        """.trimIndent()
+
+        val updated = NfoWriter.mergeActorDisplayNames(
+            existingNfo,
+            ScrapedMovieInfo(
+                number = "ABC-123",
+                title = "示例影片",
+                actors = listOf("演员甲")
+            )
+        )
+
+        assertFalse(updated.contains("旧演员"))
+        assertTrue(updated.contains("<name>演员甲</name>"))
+    }
+
     @Test
     fun mergeActorDisplayNames_collapsesSeparateActorBlocksForAnExplicitAlias() {
         val existingNfo = """

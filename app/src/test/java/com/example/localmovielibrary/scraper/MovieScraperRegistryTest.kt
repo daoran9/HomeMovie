@@ -63,7 +63,7 @@ class MovieScraperRegistryTest {
     }
 
     @Test
-    fun scrapeWithDmmPriorityStopsExternalSourcesForMsajOfficialHit() = runBlocking {
+    fun scrapeWithDmmPriorityUsesJavlibraryActorsForMsajOfficialHit() = runBlocking {
         val calls = mutableListOf<ScrapeSource>()
         val registry = MovieScraperRegistry(
             listOf(
@@ -115,10 +115,11 @@ class MovieScraperRegistryTest {
 
         val info = registry.scrapeWithDmmPriority("MSAJ-004")
 
-        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm), calls)
+        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary), calls)
         assertEquals("官方标题", info.title)
         assertEquals("120", info.runtime)
-        assertEquals(listOf("DMM 演员"), info.actors)
+        assertEquals(listOf("JavLibrary 演员"), info.actors)
+        assertEquals(listOf("JavLibrary 别名"), info.actorAliases["JavLibrary 演员"])
     }
 
     @Test

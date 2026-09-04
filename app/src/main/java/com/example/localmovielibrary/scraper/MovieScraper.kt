@@ -86,16 +86,17 @@ class MovieScraperRegistry(
          * ================================================================================
          * 步骤3：处理官方命中分支
          * ================================================================================
-         * 目标：DMM/FANZA 命中后只保留官方资料。
+         * 目标：DMM/FANZA 命中后保留官方影片资料；MSAJ 演员以 JavLibrary 为准。
          * 数据源：DMM2 详情和旧 DMM 详情。
          * 操作：
          * 1) DMM2 成功即视为严格番号命中。
          * 2) 旧 DMM 只补 DMM2 为空的字段，演员仍按官方结果处理。
+         * 3) MSAJ 额外读取 JavLibrary 演员，非空时只替换演员和别名。
          */
         val dmm2Info = collect(ScrapeSource.Dmm2)
         if (dmm2Info != null) {
             val dmmInfo = collect(ScrapeSource.Dmm)
-            val merged = mergeInfos(listOf(dmm2Info)).let { official ->
+            var merged = mergeInfos(listOf(dmm2Info)).let { official ->
                 official.copy(
                     title = official.title.ifBlank { dmmInfo?.title.orEmpty() },
                     originalTitle = official.originalTitle.ifBlank { dmmInfo?.originalTitle.orEmpty() },
@@ -116,6 +117,38 @@ class MovieScraperRegistry(
                     thumbUrl = official.thumbUrl.ifBlank { dmmInfo?.thumbUrl.orEmpty() },
                     posterUrl = official.posterUrl.ifBlank { dmmInfo?.posterUrl.orEmpty() }
                 )
+            }
+
+            /*
+             * ================================================================================
+             * 步骤4：校准 MSAJ 系列演员
+             * ================================================================================
+             * 目标：修正官方详情中不对应的演员，同时保留 DMM/FANZA 的影片字段。
+             * 数据源：当前番号对应的 JavLibrary 演员和显式 alias。
+             * 操作：
+             * 1) 只按系列前缀识别 MSAJ，不按单部影片写特例。
+             * 2) JavLibrary 演员非空时替换演员与别名，并重新归并身份。
+             * 3) JavLibrary 无演员或请求失败时保留官方演员。
+             */
+            if (usesJavlibraryActorAuthority(number)) {
+                logger?.invoke("开始校准 MSAJ 演员：number=$number, source=Javlibrary")
+
+                // 4.1 只读取 JavLibrary 演员，不进入 JavBus/JavDB 影片资料融合。
+                val javlibraryInfo = collect(ScrapeSource.Javlibrary)
+                if (javlibraryInfo?.actors?.isNotEmpty() == true) {
+                    // 4.2 影片字段继续使用官方结果，演员字段使用 JavLibrary 结果。
+                    merged = merged.copy(
+                        actors = javlibraryInfo.actors,
+                        actorAliases = javlibraryInfo.actorAliases
+                    ).canonicalizeActorIdentities()
+                    logger?.invoke(
+                        "MSAJ 演员已按 JavLibrary 校准：number=$number, " +
+                            "actors=${merged.actors.joinToString("/")}"
+                    )
+                } else {
+                    logger?.invoke("MSAJ JavLibrary 无可用演员，保留 DMM/FANZA 演员：number=$number")
+                }
+                logger?.invoke("MSAJ 演员校准结束：number=$number")
             }
 
             logger?.invoke(
@@ -690,6 +723,7 @@ class MovieScraperRegistry(
     }
 
     private companion object {
+        const val JAVLIBRARY_ACTOR_AUTHORITY_SERIES = "MSAJ"
         val SAFE_METADATA_FALLBACK_SOURCES = setOf(
             ScrapeSource.Javlibrary,
             ScrapeSource.Javbus
@@ -705,6 +739,12 @@ class MovieScraperRegistry(
         const val DEFAULT_SOURCE_TIMEOUT_MS = 8_000L
         const val WEBVIEW_SOURCE_TIMEOUT_MS = 70_000L
     }
+
+    private fun usesJavlibraryActorAuthority(number: String): Boolean =
+        extractMovieNumberInfo(number)
+            ?.number
+            ?.substringBefore('-')
+            ?.equals(JAVLIBRARY_ACTOR_AUTHORITY_SERIES, ignoreCase = true) == true
 
 }
 

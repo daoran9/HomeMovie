@@ -50,6 +50,7 @@ object NfoWriter {
      * 操作：
      * 1) 只按精确姓名或当前来源明确给出的别名识别同一演员。
      * 2) 未获本轮来源确认的旧别名不再写回，避免历史错误持续扩散。
+     * 3) 当前资料有演员时删除无法对应的旧 actor 块；当前资料为空时只清理旧头像。
      */
     fun mergeActorDisplayNames(existingNfo: String, info: ScrapedMovieInfo): String {
         if (existingNfo.isBlank()) return existingNfo
@@ -76,7 +77,7 @@ object NfoWriter {
                 return@replace actorBlock.groupValues[1] + updatedBody + actorBlock.groupValues[3]
             }
             val sourceActor = canonicalInfo.findCanonicalActor(storedName)
-                ?: return@replace actorBlock.groupValues[1] + actorBody.sanitizeActorThumbs() + actorBlock.groupValues[3]
+                ?: return@replace ""
             if (!matchedActors.add(sourceActor.actorIdentityKey())) return@replace ""
             val displayName = canonicalInfo.actorDisplayName(sourceActor)
             if (displayName == storedName) {
