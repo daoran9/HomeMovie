@@ -31,6 +31,7 @@ fun extractMovieNumberInfo(text: String): MovieNumberInfo? {
     val letterPart = match.groupValues.getOrNull(3)
         ?.takeIf { it.isNotBlank() }
         ?.uppercase(Locale.ROOT)
+        ?.takeUnless(::isEmbeddedSubtitleMarkerPart)
     val suffix = baseName.substring(match.range.last + 1)
     val numberedPart = Regex("""(?i)(?:^|[._ -])part\s*0*([0-9]{1,2})(?=$|[^a-z0-9])""")
         .find(suffix)
@@ -79,6 +80,9 @@ fun partSortKey(label: String?): Int {
         else -> Int.MAX_VALUE
     }
 }
+
+fun isEmbeddedSubtitleMarkerPart(partLabel: String): Boolean =
+    partLabel.trim().equals("C", ignoreCase = true)
 
 private val MOVIE_NUMBER_PATTERN =
     Regex("""(?i)\b([a-z]{2,10})[-_ ]?(\d{2,6})(?:[-_ ]([a-z]))?(?:$|[^a-z0-9])""")

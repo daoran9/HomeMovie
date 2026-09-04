@@ -17,7 +17,8 @@ class MovieScraperRegistry(
     scrapers: List<MovieScraper>,
     private val logger: ((String) -> Unit)? = null,
     private val webViewBackedSources: Set<ScrapeSource> = emptySet(),
-    private val webViewSourceTimeoutMs: Long = WEBVIEW_SOURCE_TIMEOUT_MS
+    private val webViewSourceTimeoutMs: Long = WEBVIEW_SOURCE_TIMEOUT_MS,
+    private val dmm2PrioritySourceTimeoutMs: Long = DMM2_SOURCE_TIMEOUT_MS
 ) {
     private val scrapersBySource = scrapers.associateBy { it.source }
 
@@ -53,13 +54,9 @@ class MovieScraperRegistry(
                 return null
             }
             val scraper = scrapersBySource[source] ?: return null
+            val timeout = prioritySourceTimeoutFor(source, sourceTimeoutMs)
             return try {
                 // 2.1 每个来源独立限时，失败后由当前分支决定是否继续。
-                val timeout = if (source in webViewBackedSources) {
-                    webViewSourceTimeoutMs
-                } else {
-                    sourceTimeoutMs
-                }
                 val info = withTimeout(timeout.coerceAtLeast(1_000L)) {
                     scraper.scrape(number)
                 }
@@ -68,7 +65,7 @@ class MovieScraperRegistry(
                 info
             } catch (error: TimeoutCancellationException) {
                 lastError = error
-                logger?.invoke("自动刮削源超时：number=$number, source=${source.name}")
+                logger?.invoke("自动刮削源超时：number=$number, source=${source.name}, timeout=${timeout}ms")
                 null
             } catch (error: CancellationException) {
                 throw error
@@ -268,13 +265,13 @@ class MovieScraperRegistry(
         }
         candidates.forEachIndexed { index, source ->
             val scraper = scrapersBySource[source] ?: return@forEachIndexed
+            val timeout = if (source in webViewBackedSources) {
+                webViewSourceTimeoutMs
+            } else {
+                sourceTimeoutMs
+            }
             try {
                 // 1.1 先执行当前候选源；超时后继续下一个来源。
-                val timeout = if (source in webViewBackedSources) {
-                    webViewSourceTimeoutMs
-                } else {
-                    sourceTimeoutMs
-                }
                 val info = withTimeout(timeout.coerceAtLeast(1_000L)) {
                     scraper.scrape(number)
                 }
@@ -297,7 +294,7 @@ class MovieScraperRegistry(
                 }
             } catch (error: TimeoutCancellationException) {
                 lastError = error
-                logger?.invoke("刮削源超时：number=$number, source=${source.name}, timeout=${if (source in webViewBackedSources) webViewSourceTimeoutMs else sourceTimeoutMs}ms")
+                logger?.invoke("刮削源超时：number=$number, source=${source.name}, timeout=${timeout}ms")
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
@@ -722,6 +719,12 @@ class MovieScraperRegistry(
             .containsMatchIn(value)
     }
 
+    private fun prioritySourceTimeoutFor(source: ScrapeSource, fallbackTimeoutMs: Long): Long = when {
+        source in webViewBackedSources -> webViewSourceTimeoutMs
+        source == ScrapeSource.Dmm2 -> dmm2PrioritySourceTimeoutMs
+        else -> fallbackTimeoutMs
+    }
+
     private companion object {
         const val JAVLIBRARY_ACTOR_AUTHORITY_SERIES = "MSAJ"
         val SAFE_METADATA_FALLBACK_SOURCES = setOf(
@@ -737,6 +740,7 @@ class MovieScraperRegistry(
             ScrapeSource.Official
         )
         const val DEFAULT_SOURCE_TIMEOUT_MS = 8_000L
+        const val DMM2_SOURCE_TIMEOUT_MS = 20_000L
         const val WEBVIEW_SOURCE_TIMEOUT_MS = 70_000L
     }
 

@@ -24,6 +24,7 @@ import com.example.localmovielibrary.scraper.isNonActorCategoryName
 import com.example.localmovielibrary.scraper.primaryActorName
 import com.example.localmovielibrary.util.detectMovieVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
+import com.example.localmovielibrary.util.isEmbeddedSubtitleMarkerPart
 import com.example.localmovielibrary.util.containsMetadataValue
 import com.example.localmovielibrary.util.metadataKey
 import com.example.localmovielibrary.util.movieKeyFromText
@@ -1274,7 +1275,9 @@ private fun String.segmentPartLabel(): String? {
     val match = Regex("""(?i)\b[a-z]{2,10}[-_ ]?\d{2,6}[-_ ]([a-z])(?:$|[^a-z0-9])""")
         .find(baseName)
         ?: return null
-    return match.groupValues[1].uppercase(Locale.ROOT)
+    return match.groupValues[1]
+        .uppercase(Locale.ROOT)
+        .takeUnless(::isEmbeddedSubtitleMarkerPart)
 }
 
 private fun String.playbackPartLabel(): String {

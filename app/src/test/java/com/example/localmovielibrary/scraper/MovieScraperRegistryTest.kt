@@ -1018,6 +1018,21 @@ class MovieScraperRegistryTest {
     }
 
     @Test
+    fun scrapeWithDmmPriorityGivesDmm2ItsOwnTimeout() = runBlocking {
+        val registry = MovieScraperRegistry(
+            scrapers = listOf(DelayedMovieScraper(ScrapeSource.Dmm2, 1_100L)),
+            dmm2PrioritySourceTimeoutMs = 2_000L
+        )
+
+        val info = registry.scrapeWithDmmPriority(
+            number = "ABC-123",
+            sourceTimeoutMs = 1_000L
+        )
+
+        assertEquals("延迟来源", info.title)
+    }
+
+    @Test
     fun actorNameMatchingRecognizesParenthesizedAliases() {
         assertTrue(actorNamesMatch("澤村レイコ（高坂保奈美", "高坂保奈美"))
         assertTrue(actorNamesMatch("あかね麗（二階堂麗）", "二階堂麗"))

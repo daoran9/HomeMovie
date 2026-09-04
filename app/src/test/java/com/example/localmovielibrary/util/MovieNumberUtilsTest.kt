@@ -41,6 +41,16 @@ class MovieNumberUtilsTest {
     }
 
     @Test
+    fun ignoresEmbeddedSubtitleMarkerAsSegment() {
+        val identity = extractMovieSourceIdentity("VEC-194-C.restored.mp4")
+
+        assertEquals("VEC-194", identity?.number)
+        assertEquals(null, identity?.partLabel)
+        assertEquals(MovieVariant.Standard, identity?.variant)
+        assertEquals("VEC-194", identity?.sourceKey)
+    }
+
+    @Test
     fun parsesPartAndEightKVersion() {
         val identity = extractMovieSourceIdentity("ebvr00104.part3_8K.mp4")
 
