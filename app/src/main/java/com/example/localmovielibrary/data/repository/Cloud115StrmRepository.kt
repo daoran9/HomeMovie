@@ -138,6 +138,7 @@ class Cloud115StrmRepository(
         if (!forceDistinct) {
             recordRepository.getCached(pickcode)
                 ?.takeIf { existing ->
+                    existing.movieId == null &&
                     (segmentInfo == null || existing.movieNumber == segmentInfo.number) &&
                         canOpenUri(existing.strmUri)
                 }

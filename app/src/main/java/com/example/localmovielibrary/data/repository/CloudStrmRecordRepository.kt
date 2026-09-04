@@ -42,9 +42,7 @@ class CloudStrmRecordRepository(
      */
     suspend fun isFinalizedInLibrary(pickcode: String, libraryRootUri: String): Boolean = withContext(Dispatchers.IO) {
         val record = dao.get(pickcode) ?: return@withContext false
-        if (record.libraryRootUri != libraryRootUri || record.movieId == null) return@withContext false
-        val movie = movieDao.getMovieLite(record.movieId) ?: return@withContext false
-        movie.libraryRootUri == libraryRootUri && canOpenUri(record.strmUri)
+        isFinalizedInLibrary(record, libraryRootUri)
     }
 
 
@@ -162,7 +160,13 @@ class CloudStrmRecordRepository(
     private suspend fun isFinalizedInLibrary(record: CloudStrmRecordEntity, libraryRootUri: String): Boolean {
         if (record.libraryRootUri != libraryRootUri || record.movieId == null) return false
         val movie = movieDao.getMovieLite(record.movieId) ?: return false
-        return movie.libraryRootUri == libraryRootUri && canOpenUri(record.strmUri)
+        if (movie.libraryRootUri != libraryRootUri || !canOpenUri(record.strmUri)) return false
+        val recordsAtSameLocation = dao.getByMovieId(record.movieId)
+            .filter { it.libraryRootUri == libraryRootUri && it.strmUri == record.strmUri }
+        val canonicalRecord = recordsAtSameLocation.minWithOrNull(
+            compareBy<CloudStrmRecordEntity> { it.createdAt }.thenBy { it.pickcode }
+        )
+        return canonicalRecord?.pickcode == record.pickcode
     }
 
     suspend fun replacePickcode(
