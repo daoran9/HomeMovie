@@ -836,7 +836,7 @@ private fun CastCard(name: String, avatarUri: String?, refreshVersion: Int, onCl
                 UriImage(
                     uri = avatarUri,
                     modifier = Modifier.fillMaxSize(),
-                    contentScale = ContentScale.Crop,
+                    contentScale = ContentScale.Fit,
                     maxDecodeSize = 320,
                     refreshVersion = refreshVersion.toLong()
                 )

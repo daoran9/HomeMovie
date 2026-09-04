@@ -1098,7 +1098,7 @@ private fun ActorSummaryCard(summary: MovieMetadataSummary, avatarUri: String?, 
             contentAlignment = Alignment.Center
         ) {
             if (avatarUri != null) {
-                UriImage(uri = avatarUri, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Crop, maxDecodeSize = 360)
+                UriImage(uri = avatarUri, modifier = Modifier.fillMaxSize(), contentScale = ContentScale.Fit, maxDecodeSize = 360)
             } else {
                 Icon(Icons.Rounded.Person, contentDescription = null, tint = Color.White.copy(alpha = 0.82f), modifier = Modifier.size(38.dp))
             }
