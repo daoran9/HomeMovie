@@ -1,5 +1,6 @@
 package com.example.localmovielibrary.scraper
 
+import com.example.localmovielibrary.util.cleanMetadataText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
@@ -170,6 +171,7 @@ class Dmm2Scraper(
             .put("id", returnedId)
             .put("title", ppv.optString("title"))
             .put("deliveryStartAt", ppv.optString("deliveryStartDate"))
+            .put("sampleMovie", ppv.optJSONObject("sampleMovie") ?: JSONObject())
             .put("review", data.optJSONObject("reviewSummary") ?: JSONObject())
     }
 
@@ -324,7 +326,9 @@ class Dmm2Scraper(
         val series = ppv.optJSONObject("series")?.optString("name").orEmpty().cleanText()
         val rating = review?.optString("average").orEmpty().cleanText()
             .ifBlank { searchItem.optJSONObject("review")?.optString("average").orEmpty().cleanText() }
-        val sampleMovie = searchItem.optJSONObject("sampleMovie") ?: JSONObject()
+        val sampleMovie = searchItem.optJSONObject("sampleMovie")
+            ?: ppv.optJSONObject("sampleMovie")
+            ?: JSONObject()
         val trailer = sampleMovie.optString("mp4Url").ifBlank { sampleMovie.optString("hlsUrl") }.cleanText()
         val plot = ppv.optString("description").cleanText()
             .ifBlank {
@@ -440,18 +444,7 @@ class Dmm2Scraper(
         }.getOrDefault(date)
     }
 
-    private fun String.cleanText(): String =
-        replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&quot;", "\"")
-            .replace("&#39;", "'")
-            .replace("&nbsp;", " ")
-            .replace("\u00A0", " ")
-            .replace("\r", "")
-            .replace("\n", "")
-            .replace("\t", "")
-            .trim()
+    private fun String.cleanText(): String = cleanMetadataText()
 
     private fun String.isUsableDmmActorImage(): Boolean =
         isNotBlank() && !contains("now-printing", ignoreCase = true) &&
@@ -516,6 +509,7 @@ query Test(${'$'}id: ID!) {
     releaseStatus
     isAllowForeign
     packageImage { mediumUrl largeUrl }
+    sampleMovie { hlsUrl mp4Url vrUrl }
     sampleImages { number imageUrl largeImageUrl }
     maker { id name }
     label { id name }

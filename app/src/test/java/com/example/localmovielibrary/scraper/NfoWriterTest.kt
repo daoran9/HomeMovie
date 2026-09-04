@@ -7,6 +7,35 @@ import org.junit.Test
 
 class NfoWriterTest {
     @Test
+    fun buildCleansNarrativeTextAndUsesTheNonBlankPlotField() {
+        val nfo = NfoWriter.build(
+            ScrapedMovieInfo(
+                number = "ABC-123",
+                title = "示例影片",
+                plot = "第一行&lt;br&gt;第二行",
+                outline = ""
+            )
+        )
+
+        assertTrue(nfo.contains("<plot>第一行\n第二行</plot>"))
+        assertTrue(nfo.contains("<outline>第一行\n第二行</outline>"))
+    }
+
+    @Test
+    fun buildEscapesUrlsWithoutApplyingNarrativeHtmlCleanup() {
+        val trailer = "https://video.example/test?x=1&y=2"
+        val nfo = NfoWriter.build(
+            ScrapedMovieInfo(
+                number = "ABC-123",
+                title = "示例影片",
+                trailer = trailer
+            )
+        )
+
+        assertTrue(nfo.contains("<trailer>https://video.example/test?x=1&amp;y=2</trailer>"))
+    }
+
+    @Test
     fun build_removesZeroTrimmedNumberPrefixFromTitle() {
         val nfo = NfoWriter.build(
             ScrapedMovieInfo(

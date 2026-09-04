@@ -3,6 +3,7 @@ package com.example.localmovielibrary.scanner
 import android.content.ContentResolver
 import android.net.Uri
 import android.util.Xml
+import com.example.localmovielibrary.util.cleanMetadataText
 import org.xmlpull.v1.XmlPullParser
 
 class NfoParser(private val contentResolver: ContentResolver) {
@@ -29,6 +30,7 @@ class NfoParser(private val contentResolver: ContentResolver) {
         var outline: String? = null
         var year: Int? = null
         var premiered: String? = null
+        var releaseDate: String? = null
         var runtime: Int? = null
         var mpaa: String? = null
         var series: String? = null
@@ -43,10 +45,11 @@ class NfoParser(private val contentResolver: ContentResolver) {
                 "outline" -> outline = parser.readText()
                 "year" -> year = parser.readText().toIntOrNull()
                 "premiered" -> premiered = parser.readText()
+                "releasedate" -> releaseDate = parser.readText()
                 "runtime" -> runtime = parser.readText().extractFirstInt()
                 "mpaa" -> mpaa = parser.readText()
                 "certification" -> mpaa = parser.readText()
-                "studio" -> studios += parser.readText().splitMultiValue()
+                "studio", "maker", "publisher", "label" -> studios += parser.readText().splitMultiValue()
                 "series", "set" -> series = parser.readText()
                 "director" -> directors += parser.readText().splitMultiValue()
                 "genre" -> genres += parser.readText().splitMultiValue()
@@ -69,13 +72,15 @@ class NfoParser(private val contentResolver: ContentResolver) {
             }
         }
 
+        val cleanedPlot = plot.clean()
+        val cleanedOutline = outline.clean()
         return NfoMetadata(
             title = title.clean(),
             originalTitle = originalTitle.clean(),
-            plot = plot.clean(),
-            outline = outline.clean(),
+            plot = cleanedPlot ?: cleanedOutline,
+            outline = cleanedOutline ?: cleanedPlot,
             year = year,
-            premiered = premiered.clean(),
+            premiered = releaseDate.clean() ?: premiered.clean(),
             runtimeMinutes = runtime,
             mpaa = mpaa.clean(),
             studios = studios.cleanedDistinct(),
@@ -122,13 +127,24 @@ class NfoParser(private val contentResolver: ContentResolver) {
     }
 
     private fun XmlPullParser.readText(): String {
-        if (next() != XmlPullParser.TEXT) return ""
-        val result = text.orEmpty()
-        nextTag()
+        val elementDepth = depth
+        val result = buildString {
+            while (next() != XmlPullParser.END_DOCUMENT) {
+                when (eventType) {
+                    XmlPullParser.TEXT, XmlPullParser.CDSECT -> append(text.orEmpty())
+                    XmlPullParser.START_TAG -> {
+                        if (name.equals("br", ignoreCase = true)) append('\n')
+                    }
+                    XmlPullParser.END_TAG -> {
+                        if (depth == elementDepth) break
+                    }
+                }
+            }
+        }
         return result.trim()
     }
 
-    private fun String?.clean(): String? = this?.trim()?.takeIf { it.isNotBlank() }
+    private fun String?.clean(): String? = this?.cleanMetadataText()?.takeIf { it.isNotBlank() }
 
     private fun String.extractFirstInt(): Int? =
         Regex("""\d+""").find(this)?.value?.toIntOrNull()

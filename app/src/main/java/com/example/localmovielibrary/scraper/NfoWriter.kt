@@ -1,16 +1,20 @@
 package com.example.localmovielibrary.scraper
 
+import com.example.localmovielibrary.util.cleanMetadataText
+
 object NfoWriter {
     fun build(info: ScrapedMovieInfo): String = buildString {
         val canonicalInfo = info.canonicalizeActorIdentities()
+        val plot = info.plot.cleanMetadataText()
+        val outline = info.outline.cleanMetadataText()
         appendLine("""<?xml version="1.0" encoding="utf-8"?>""")
         appendLine("<movie>")
         tag("title", info.formattedTitle())
         tag("originaltitle", info.originalTitle)
         tag("sorttitle", info.number)
         tag("num", info.number)
-        tag("plot", info.plot)
-        tag("outline", info.outline)
+        tag("plot", plot.ifBlank { outline })
+        tag("outline", outline.ifBlank { plot })
         tag("premiered", info.premiered)
         tag("releasedate", info.premiered)
         tag("year", info.year)
@@ -21,11 +25,11 @@ object NfoWriter {
         tag("label", info.publisher)
         tag("series", info.series)
         tag("rating", info.rating)
-        tag("trailer", info.trailer)
-        tag("website", info.website)
-        tag("source", info.source)
-        tag("thumb", info.thumbUrl)
-        tag("poster", info.posterUrl)
+        tag("trailer", info.trailer, normalizeText = false)
+        tag("website", info.website, normalizeText = false)
+        tag("source", info.source, normalizeText = false)
+        tag("thumb", info.thumbUrl, normalizeText = false)
+        tag("poster", info.posterUrl, normalizeText = false)
         info.directors.normalizedValues().forEach { tag("director", it) }
         info.genres.normalizedValues().forEach { tag("genre", it) }
         info.tags.normalizedValues().forEach { tag("tag", it) }
@@ -34,7 +38,7 @@ object NfoWriter {
             tag("name", canonicalInfo.actorDisplayName(actor), indent = "    ")
             canonicalInfo.actorImageUrls[actor]
                 ?.takeIf(::isActorIdentityImageUrl)
-                ?.let { tag("thumb", it, indent = "    ") }
+                ?.let { tag("thumb", it, indent = "    ", normalizeText = false) }
             tag("type", "Actor", indent = "    ")
             appendLine("  </actor>")
         }
@@ -125,12 +129,18 @@ object NfoWriter {
     private fun String.actorIdentityKey(): String =
         actorNameVariants(this).sorted().joinToString("|")
 
-    private fun StringBuilder.tag(name: String, value: String, indent: String = "  ") {
+    private fun StringBuilder.tag(
+        name: String,
+        value: String,
+        indent: String = "  ",
+        normalizeText: Boolean = true
+    ) {
+        val serializedValue = if (normalizeText) value.cleanMetadataText() else value.trim()
         append(indent)
         append("<")
         append(name)
         append(">")
-        append(value.escapeXml())
+        append(serializedValue.escapeXml())
         append("</")
         append(name)
         appendLine(">")
