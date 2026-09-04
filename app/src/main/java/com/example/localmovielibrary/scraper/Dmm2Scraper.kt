@@ -480,7 +480,6 @@ query AvSearch(${'$'}limit: Int!, ${'$'}offset: Int, ${'$'}floor: PPVFloor, ${'$
         contentType
         packageImage { mediumUrl largeUrl }
         sampleImages { number largeUrl }
-        sampleMovie { hlsUrl mp4Url vrUrl }
         releaseStatus
         review { average count }
         deliveryStartAt
@@ -509,7 +508,6 @@ query Test(${'$'}id: ID!) {
     releaseStatus
     isAllowForeign
     packageImage { mediumUrl largeUrl }
-    sampleMovie { hlsUrl mp4Url vrUrl }
     sampleImages { number imageUrl largeImageUrl }
     maker { id name }
     label { id name }
