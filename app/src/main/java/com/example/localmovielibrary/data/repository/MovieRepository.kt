@@ -18,8 +18,8 @@ import kotlinx.coroutines.flow.map
 import com.example.localmovielibrary.playback.PickcodeExtractor
 import com.example.localmovielibrary.scanner.LibraryScanner
 import com.example.localmovielibrary.scanner.NfoParser
+import com.example.localmovielibrary.scraper.actorNameParts
 import com.example.localmovielibrary.scraper.actorNameVariants
-import com.example.localmovielibrary.scraper.actorNamesHaveExactVariant
 import com.example.localmovielibrary.scraper.isNonActorCategoryName
 import com.example.localmovielibrary.scraper.primaryActorName
 import com.example.localmovielibrary.util.detectMovieVariant
@@ -223,8 +223,13 @@ class MovieRepository(
         value: String,
         exact: Boolean
     ): List<MovieEntity> {
+        val matchingMovieIds = actorIdentityMovieIds(
+            candidates.map { movie -> MovieActorMetadataList(movie.id, movie.actors) },
+            value,
+            exact
+        )
         return candidates
-            .filter { movie -> movie.actors.containsActorIdentity(value, exact) }
+            .filter { movie -> movie.id in matchingMovieIds }
             .sortedBy { it.sortTitle.ifBlank { it.title }.lowercase(Locale.ROOT) }
     }
 
@@ -1108,19 +1113,47 @@ private fun MovieEntity.matchesMovieNumber(number: String): Boolean =
         .any { source -> extractMovieNumberInfo(source)?.number == number }
 
 internal fun summarizeActors(values: List<MovieActorMetadataList>): List<MovieMetadataSummary> =
-    values.flatMap { movie ->
+    ActorIdentityIndex(values).summaries()
+
+internal fun actorIdentityMovieIds(
+    values: List<MovieActorMetadataList>,
+    value: String,
+    exact: Boolean
+): Set<Long> = ActorIdentityIndex(values).movieIdsMatching(value, exact)
+
+/*
+ * ================================================================================
+ * 步骤2：构建演员别名身份组
+ * ================================================================================
+ * 目标：让“主名（别名）”跨影片连通，演员页、搜索和影片数量使用同一身份判断。
+ * 数据源：Room 保存的每部影片演员文本，其中括号内姓名是该演员的显式别名。
+ * 操作：
+ * 1) 每条演员文本拆成主名和全部显式别名，并保留影片 ID。
+ * 2) 两条记录只要共享任一规范化姓名，就合并为同一个身份组。
+ * 3) 汇总时按身份组去重影片；查询时返回整组关联的所有影片。
+ */
+private class ActorIdentityIndex(values: List<MovieActorMetadataList>) {
+    private val records = values.flatMap { movie ->
         movie.actors.mapNotNull { rawActor ->
-            val displayName = rawActor.primaryActorName()
-            val identityKey = displayName.actorIdentityKey()
-            if (displayName.isBlank() || identityKey.isBlank() || isNonActorCategoryName(displayName)) {
+            val names = actorNameParts(rawActor)
+            val displayName = names.firstOrNull().orEmpty()
+            val identityKeys = names.flatMap(::actorNameVariants).toSet()
+            if (displayName.isBlank() || identityKeys.isEmpty() || isNonActorCategoryName(displayName)) {
                 null
             } else {
-                ActorSummaryEntry(movie.movieId, displayName, identityKey)
+                ActorIdentityRecord(movie.movieId, displayName, names, identityKeys)
             }
         }
     }
-        .groupBy { it.identityKey }
-        .map { (_, group) ->
+    private val parents = IntArray(records.size) { index -> index }
+    private val groups by lazy { buildGroups() }
+
+    init {
+        connectExplicitAliases()
+    }
+
+    fun summaries(): List<MovieMetadataSummary> = groups.values
+        .map { group ->
             MovieMetadataSummary(
                 value = group.first().displayName,
                 count = group.map { it.movieId }.distinct().size
@@ -1128,29 +1161,66 @@ internal fun summarizeActors(values: List<MovieActorMetadataList>): List<MovieMe
         }
         .sortedWith(compareByDescending<MovieMetadataSummary> { it.count }.thenBy { it.value.lowercase(Locale.ROOT) })
 
-internal fun List<String>.containsActorIdentity(value: String, exact: Boolean): Boolean {
-    val query = value.primaryActorName()
-    val queryKey = query.metadataKey()
-    if (query.isBlank() || queryKey.isBlank()) return false
-    return any { rawActor ->
-        val primaryName = rawActor.primaryActorName()
-        primaryName.isNotBlank() &&
-            !isNonActorCategoryName(primaryName) &&
-            (
-                actorNamesHaveExactVariant(rawActor, query) ||
-                    (!exact && primaryName.metadataKey().contains(queryKey))
-                )
+    fun movieIdsMatching(value: String, exact: Boolean): Set<Long> {
+        val query = value.primaryActorName()
+        val queryKey = query.metadataKey()
+        val queryIdentityKeys = actorNameVariants(query)
+        if (query.isBlank() || queryKey.isBlank() || queryIdentityKeys.isEmpty()) return emptySet()
+
+        // 2.1 先找到直接命中的记录，再通过其身份组扩展到别名所在的其它影片。
+        val matchingRoots = records.indices.mapNotNull { index ->
+            val record = records[index]
+            val matchesExactIdentity = record.identityKeys.any { it in queryIdentityKeys }
+            val matchesPartialName = !exact && record.names.any { name ->
+                name.metadataKey().contains(queryKey)
+            }
+            find(index).takeIf { matchesExactIdentity || matchesPartialName }
+        }.toSet()
+
+        return matchingRoots.flatMapTo(mutableSetOf()) { root ->
+            groups[root].orEmpty().map(ActorIdentityRecord::movieId)
+        }
+    }
+
+    private fun connectExplicitAliases() {
+        val firstRecordByIdentityKey = mutableMapOf<String, Int>()
+        records.forEachIndexed { index, record ->
+            // 2.2 同一姓名键出现于任意两条记录时，保留它们之间的别名连通关系。
+            record.identityKeys.forEach { identityKey ->
+                val firstIndex = firstRecordByIdentityKey.putIfAbsent(identityKey, index)
+                if (firstIndex != null) union(firstIndex, index)
+            }
+        }
+    }
+
+    private fun buildGroups(): Map<Int, List<ActorIdentityRecord>> =
+        records.indices.groupBy(::find).mapValues { (_, indexes) -> indexes.map(records::get) }
+
+    private fun union(left: Int, right: Int) {
+        val leftRoot = find(left)
+        val rightRoot = find(right)
+        if (leftRoot != rightRoot) parents[rightRoot] = leftRoot
+    }
+
+    private fun find(index: Int): Int {
+        var root = index
+        while (parents[root] != root) root = parents[root]
+        var current = index
+        while (parents[current] != current) {
+            val next = parents[current]
+            parents[current] = root
+            current = next
+        }
+        return root
     }
 }
 
-private data class ActorSummaryEntry(
+private data class ActorIdentityRecord(
     val movieId: Long,
     val displayName: String,
-    val identityKey: String
+    val names: List<String>,
+    val identityKeys: Set<String>
 )
-
-private fun String.actorIdentityKey(): String =
-    actorNameVariants(primaryActorName()).sorted().joinToString("|")
 
 private fun summarizeValues(values: List<String>): List<MovieMetadataSummary> =
     values.map { it.trim().replace(Regex("""\s+"""), " ") }

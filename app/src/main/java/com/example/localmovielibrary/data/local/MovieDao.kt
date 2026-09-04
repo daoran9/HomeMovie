@@ -57,7 +57,7 @@ interface MovieDao {
     )
     suspend fun getMoviePlaybackKeyItemsPage(limit: Int, offset: Int): List<MoviePlaybackKeyItem>
 
-    @Query("SELECT id AS movieId, actors FROM movies WHERE actors != ''")
+    @Query("SELECT id AS movieId, actors FROM movies WHERE actors != '' ORDER BY id ASC")
     suspend fun getActorMetadataLists(): List<MovieActorMetadataList>
 
     @Query("SELECT tags AS items FROM movies WHERE tags != ''")

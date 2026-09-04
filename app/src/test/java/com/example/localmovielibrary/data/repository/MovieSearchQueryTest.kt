@@ -35,19 +35,22 @@ class MovieSearchQueryTest {
 
     @Test
     fun actorSummaryUsesOneIdentityAcrossNameVariantsAndCountsMoviesOnce() {
-        val summaries = summarizeActors(
-            listOf(
-                MovieActorMetadataList(1, listOf("上原亚衣（原田麻衣、秋元凛）")),
-                MovieActorMetadataList(2, listOf("上原亜衣")),
-                MovieActorMetadataList(3, listOf("波多野结衣", "波多野結衣")),
-                MovieActorMetadataList(4, listOf("演员:（櫻井美優）"))
-            )
-        ).associateBy { it.value }
+        val actors = listOf(
+            MovieActorMetadataList(1, listOf("上原亚衣（原田麻衣、秋元凛）")),
+            MovieActorMetadataList(2, listOf("上原亜衣")),
+            MovieActorMetadataList(3, listOf("波多野结衣", "波多野結衣")),
+            MovieActorMetadataList(4, listOf("演员:（櫻井美優）")),
+            MovieActorMetadataList(5, listOf("日向あいり（橘優花）")),
+            MovieActorMetadataList(6, listOf("橘優花"))
+        )
+        val summaries = summarizeActors(actors).associateBy { it.value }
 
         assertEquals(2, summaries["上原亚衣"]?.count)
         assertEquals(1, summaries["波多野结衣"]?.count)
         assertEquals(1, summaries["櫻井美優"]?.count)
-        assertTrue(listOf("上原亜衣").containsActorIdentity("上原亚衣", exact = true))
-        assertTrue(listOf("波多野结衣").containsActorIdentity("波多野結衣", exact = true))
+        assertEquals(2, summaries["日向あいり"]?.count)
+        assertEquals(setOf(5L, 6L), actorIdentityMovieIds(actors, "日向あいり", exact = true))
+        assertEquals(setOf(5L, 6L), actorIdentityMovieIds(actors, "橘優花", exact = true))
+        assertTrue(actorIdentityMovieIds(actors, "日向", exact = false).containsAll(setOf(5L, 6L)))
     }
 }
