@@ -131,18 +131,24 @@ class JavbusScraper(
             .distinct()
             .toList()
 
-    private fun parseActorImageUrls(html: String): Map<String, String> =
-        Regex(
-            """<div[^>]+class=["'][^"']*\bstar-box\b[^"']*["'][^>]*>[\s\S]*?<img[^>]+src=["']([^"']+)["'][^>]+title=["']([^"']+)["']""",
-            RegexOption.IGNORE_CASE
-        ).findAll(html)
-            .mapNotNull { match ->
-                val url = absoluteUrl(match.groupValues[1])
-                val name = cleanHtml(match.groupValues[2])
-                if (name.isBlank() || url.isBlank()) null else name to url
-            }
-            .distinctBy { it.first }
-            .toMap()
+    internal fun parseActorImageUrls(html: String): Map<String, String> {
+        val boxes = STAR_BOX_START.findAll(html).toList()
+        return boxes.mapIndexedNotNull { index, box ->
+            val blockEnd = boxes.getOrNull(index + 1)?.range?.first ?: html.length
+            val block = html.substring(box.range.first, blockEnd)
+            val imageTag = IMAGE_TAG.find(block)?.value ?: return@mapIndexedNotNull null
+            val url = absoluteUrl(imageTag.htmlAttribute("src"))
+            val name = cleanHtml(imageTag.htmlAttribute("title"))
+            if (name.isBlank() || url.isBlank()) null else name to url
+        }.distinctBy { it.first }.toMap()
+    }
+
+    private fun String.htmlAttribute(name: String): String =
+        Regex("""\b${Regex.escape(name)}\s*=\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+            .find(this)
+            ?.groupValues
+            ?.getOrNull(1)
+            .orEmpty()
 
     private fun h3Title(html: String): String =
         Regex("""<h3[^>]*>([\s\S]*?)</h3>""", RegexOption.IGNORE_CASE)
@@ -239,6 +245,11 @@ class JavbusScraper(
     }
 
     private companion object {
+        val STAR_BOX_START = Regex(
+            """<div\b[^>]*\bclass=["'][^"']*\bstar-box\b[^"']*["'][^>]*>""",
+            RegexOption.IGNORE_CASE
+        )
+        val IMAGE_TAG = Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE)
         const val BASE_URL = "https://www.javbus.com"
         const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
     }
