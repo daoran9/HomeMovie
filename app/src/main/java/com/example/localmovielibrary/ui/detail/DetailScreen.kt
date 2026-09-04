@@ -86,6 +86,9 @@ import com.example.localmovielibrary.data.local.MovieEntity
 import com.example.localmovielibrary.data.repository.MoviePlaybackPart
 import com.example.localmovielibrary.scraper.ActorAvatarStore
 import com.example.localmovielibrary.scraper.MissavScraper
+import com.example.localmovielibrary.scraper.actorNameVariants
+import com.example.localmovielibrary.scraper.isNonActorCategoryName
+import com.example.localmovielibrary.scraper.primaryActorName
 import com.example.localmovielibrary.ui.shared.UriImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -838,7 +841,11 @@ private fun ReleaseAndOverview(movie: MovieEntity, onTagClick: (String) -> Unit)
 
 @Composable
 fun CastSection(actors: List<String>, refreshVersion: Int, onActorClick: (String) -> Unit) {
-    if (actors.isEmpty()) return
+    val displayActors = actors
+        .map { it.primaryActorName() }
+        .filter { it.isNotBlank() && !isNonActorCategoryName(it) }
+        .distinctBy { actor -> actorNameVariants(actor).sorted().joinToString("|") }
+    if (displayActors.isEmpty()) return
     val context = LocalContext.current
     val avatarStore = remember(context, refreshVersion) { ActorAvatarStore(context) }
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -849,7 +856,7 @@ fun CastSection(actors: List<String>, refreshVersion: Int, onActorClick: (String
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            actors.take(24).forEach { actor ->
+            displayActors.take(24).forEach { actor ->
                 CastCard(
                     name = actor,
                     avatarUri = avatarStore.avatarUri(actor),

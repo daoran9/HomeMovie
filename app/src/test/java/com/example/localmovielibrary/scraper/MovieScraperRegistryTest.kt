@@ -972,6 +972,12 @@ class MovieScraperRegistryTest {
     }
 
     @Test
+    fun actorNamePartsDropsFieldLabelAndNormalizesSimplifiedCharacters() {
+        assertEquals(listOf("櫻井美優"), actorNameParts("演员:（櫻井美優）"))
+        assertTrue(actorNamesHaveExactVariant("波多野结衣", "波多野結衣"))
+    }
+
+    @Test
     fun canonicalizeActorIdentitiesKeepsFirstNameWhenAliasMapIsReversed() {
         val info = ScrapedMovieInfo(
             number = "NAMH-022",

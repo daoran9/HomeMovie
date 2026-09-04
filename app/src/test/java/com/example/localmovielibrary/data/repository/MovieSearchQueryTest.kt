@@ -1,7 +1,9 @@
 package com.example.localmovielibrary.data.repository
 
+import com.example.localmovielibrary.data.local.MovieActorMetadataList
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MovieSearchQueryTest {
@@ -29,5 +31,23 @@ class MovieSearchQueryTest {
     fun keepsPlainTextSearchOutOfMovieNumberLookup() {
         // 1.3 非番号输入继续只走原有全文搜索。
         assertNull(movieNumberSearchQuery("泉りおん"))
+    }
+
+    @Test
+    fun actorSummaryUsesOneIdentityAcrossNameVariantsAndCountsMoviesOnce() {
+        val summaries = summarizeActors(
+            listOf(
+                MovieActorMetadataList(1, listOf("上原亚衣（原田麻衣、秋元凛）")),
+                MovieActorMetadataList(2, listOf("上原亜衣")),
+                MovieActorMetadataList(3, listOf("波多野结衣", "波多野結衣")),
+                MovieActorMetadataList(4, listOf("演员:（櫻井美優）"))
+            )
+        ).associateBy { it.value }
+
+        assertEquals(2, summaries["上原亚衣"]?.count)
+        assertEquals(1, summaries["波多野结衣"]?.count)
+        assertEquals(1, summaries["櫻井美優"]?.count)
+        assertTrue(listOf("上原亜衣").containsActorIdentity("上原亚衣", exact = true))
+        assertTrue(listOf("波多野结衣").containsActorIdentity("波多野結衣", exact = true))
     }
 }

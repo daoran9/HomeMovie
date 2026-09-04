@@ -9,6 +9,7 @@ import androidx.documentfile.provider.DocumentFile
 import com.example.localmovielibrary.cloud115.Cloud115Client
 import com.example.localmovielibrary.data.local.CloudStrmRecordDao
 import com.example.localmovielibrary.data.local.CloudStrmRecordEntity
+import com.example.localmovielibrary.data.local.MovieActorMetadataList
 import com.example.localmovielibrary.data.local.MovieDao
 import com.example.localmovielibrary.data.local.MovieEntity
 import com.example.localmovielibrary.data.local.MovieListItem
@@ -17,6 +18,10 @@ import kotlinx.coroutines.flow.map
 import com.example.localmovielibrary.playback.PickcodeExtractor
 import com.example.localmovielibrary.scanner.LibraryScanner
 import com.example.localmovielibrary.scanner.NfoParser
+import com.example.localmovielibrary.scraper.actorNameVariants
+import com.example.localmovielibrary.scraper.actorNamesHaveExactVariant
+import com.example.localmovielibrary.scraper.isNonActorCategoryName
+import com.example.localmovielibrary.scraper.primaryActorName
 import com.example.localmovielibrary.util.detectMovieVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
 import com.example.localmovielibrary.util.containsMetadataValue
@@ -56,7 +61,7 @@ class MovieRepository(
     suspend fun getLibrarySummaries(): MovieLibrarySummaries = withContext(Dispatchers.IO) {
         MovieLibrarySummaries(
             collections = summarizeTexts(movieDao.getSeriesMetadataTexts().mapNotNull { it.value }),
-            actors = summarizeValues(movieDao.getActorMetadataLists().flatMap { it.items }),
+            actors = summarizeActors(movieDao.getActorMetadataLists()),
             tags = summarizeValues(movieDao.getTagMetadataLists().flatMap { it.items }),
             genres = summarizeValues(movieDao.getGenreMetadataLists().flatMap { it.items }),
             studios = summarizeValues(movieDao.getStudioMetadataLists().flatMap { it.items })
@@ -159,7 +164,7 @@ class MovieRepository(
         val normalizedScope = scope.lowercase(Locale.ROOT)
         val directMatches = when (normalizedScope) {
             "title" -> movieDao.searchMoviesByTitleLite(pattern)
-            "actor" -> filterMetadataMovies(movieDao.getMoviesForActorLookupLite(pattern), text, exact = false) { it.actors }
+            "actor" -> filterActorMovies(movieDao.getMoviesForMetadataLookupLite(), text, exact = false)
             "tag" -> filterMetadataMovies(movieDao.getMoviesForTagLookupLite(pattern), text, exact = false) { it.tags }
             "genre" -> filterMetadataMovies(movieDao.getMoviesForGenreLookupLite(pattern), text, exact = false) { it.genres }
             else -> movieDao.searchMoviesLite(pattern)
@@ -192,7 +197,7 @@ class MovieRepository(
         if (text.isBlank()) return@withContext emptyList()
         val pattern = "%${text.escapeLikePattern()}%"
         when (type.lowercase(Locale.ROOT)) {
-            "actor" -> filterMetadataMovies(movieDao.getMoviesForActorLookupLite(pattern), text, exact = true) { it.actors }
+            "actor" -> filterActorMovies(movieDao.getMoviesForMetadataLookupLite(), text, exact = true)
             "tag" -> filterMetadataMovies(movieDao.getMoviesForTagLookupLite(pattern), text, exact = true) { it.tags }
             "genre" -> filterMetadataMovies(movieDao.getMoviesForGenreLookupLite(pattern), text, exact = true) { it.genres }
             "year" -> movieDao.searchMoviesByYearLite(text)
@@ -210,6 +215,16 @@ class MovieRepository(
     ): List<MovieEntity> {
         return candidates
             .filter { movie -> values(movie).containsMetadataValue(value, exact) }
+            .sortedBy { it.sortTitle.ifBlank { it.title }.lowercase(Locale.ROOT) }
+    }
+
+    private fun filterActorMovies(
+        candidates: List<MovieEntity>,
+        value: String,
+        exact: Boolean
+    ): List<MovieEntity> {
+        return candidates
+            .filter { movie -> movie.actors.containsActorIdentity(value, exact) }
             .sortedBy { it.sortTitle.ifBlank { it.title }.lowercase(Locale.ROOT) }
     }
 
@@ -1091,6 +1106,51 @@ internal fun movieNumberSearchQuery(text: String): MovieNumberSearchQuery? {
 private fun MovieEntity.matchesMovieNumber(number: String): Boolean =
     listOf(videoName, title, originalTitle.orEmpty(), uniqueIds.joinToString(" "))
         .any { source -> extractMovieNumberInfo(source)?.number == number }
+
+internal fun summarizeActors(values: List<MovieActorMetadataList>): List<MovieMetadataSummary> =
+    values.flatMap { movie ->
+        movie.actors.mapNotNull { rawActor ->
+            val displayName = rawActor.primaryActorName()
+            val identityKey = displayName.actorIdentityKey()
+            if (displayName.isBlank() || identityKey.isBlank() || isNonActorCategoryName(displayName)) {
+                null
+            } else {
+                ActorSummaryEntry(movie.movieId, displayName, identityKey)
+            }
+        }
+    }
+        .groupBy { it.identityKey }
+        .map { (_, group) ->
+            MovieMetadataSummary(
+                value = group.first().displayName,
+                count = group.map { it.movieId }.distinct().size
+            )
+        }
+        .sortedWith(compareByDescending<MovieMetadataSummary> { it.count }.thenBy { it.value.lowercase(Locale.ROOT) })
+
+internal fun List<String>.containsActorIdentity(value: String, exact: Boolean): Boolean {
+    val query = value.primaryActorName()
+    val queryKey = query.metadataKey()
+    if (query.isBlank() || queryKey.isBlank()) return false
+    return any { rawActor ->
+        val primaryName = rawActor.primaryActorName()
+        primaryName.isNotBlank() &&
+            !isNonActorCategoryName(primaryName) &&
+            (
+                actorNamesHaveExactVariant(rawActor, query) ||
+                    (!exact && primaryName.metadataKey().contains(queryKey))
+                )
+    }
+}
+
+private data class ActorSummaryEntry(
+    val movieId: Long,
+    val displayName: String,
+    val identityKey: String
+)
+
+private fun String.actorIdentityKey(): String =
+    actorNameVariants(primaryActorName()).sorted().joinToString("|")
 
 private fun summarizeValues(values: List<String>): List<MovieMetadataSummary> =
     values.map { it.trim().replace(Regex("""\s+"""), " ") }

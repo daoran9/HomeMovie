@@ -817,7 +817,13 @@ private val ACTOR_NAME_CHAR_VARIANTS = mapOf(
     '边' to '邊',
     '叶' to '葉',
     '绪' to '緒',
-    '真' to '眞'
+    '真' to '眞',
+    '结' to '結'
+)
+
+private val ACTOR_FIELD_LABEL_PREFIX = Regex(
+    """^(?:演员|演員|女优|女優|出演者|出演女优|出演女優|cast)\s*[:：]\s*""",
+    RegexOption.IGNORE_CASE
 )
 
 /**
@@ -837,6 +843,7 @@ internal fun actorNameParts(value: String): List<String> =
         .split(Regex("[(),、，/／|;；]+"))
         .map { actor ->
             Normalizer.normalize(actor.trim(), Normalizer.Form.NFKC)
+                .replace(ACTOR_FIELD_LABEL_PREFIX, "")
                 .replace(Regex("\\s+"), " ")
                 .trim()
         }
