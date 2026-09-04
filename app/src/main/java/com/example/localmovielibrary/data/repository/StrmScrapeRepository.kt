@@ -1261,11 +1261,19 @@ class StrmScrapeRepository(
              * 数据源：多源融合后的 actorImageCandidates。
              * 操作：
              * 1) 候选已按 DMM/FANZA、JavDB、JavBus 顺序排列。
-             * 2) 仅当前两轮官方回查未命中时下载第一个可用候选。
+             * 2) JavBus 演员图片使用同站影片页 Referer，避免混合资料源时被 CDN 拒绝。
+             * 3) 仅当前两轮官方回查未命中时下载第一个可用候选。
              */
             if (!saved && allowSourceImages) {
                 actorImageCandidates(info, actorName).forEach { url ->
-                    if (!saved) tryDownload(url, "metadata")
+                    if (!saved) {
+                        val referer = if (url.startsWith("$JAVBUS_BASE_URL/pics/actress/", ignoreCase = true)) {
+                            "$JAVBUS_BASE_URL${info.number}"
+                        } else {
+                            imageReferer
+                        }
+                        tryDownload(url, "metadata", referer = referer)
+                    }
                 }
             }
 
