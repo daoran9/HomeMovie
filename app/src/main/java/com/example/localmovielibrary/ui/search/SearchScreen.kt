@@ -187,11 +187,14 @@ private fun SearchResultsGrid(
 ) {
     val gridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
     var visibleCount by rememberSaveable { mutableStateOf(SEARCH_INITIAL_COUNT) }
+    var appliedResetKey by rememberSaveable { mutableStateOf<String?>(null) }
     val visibleMovies = remember(movies, visibleCount) {
         movies.take(visibleCount.coerceIn(0, movies.size))
     }
 
     LaunchedEffect(resetKey) {
+        if (appliedResetKey == resetKey) return@LaunchedEffect
+        appliedResetKey = resetKey
         visibleCount = SEARCH_INITIAL_COUNT.coerceAtMost(movies.size)
         gridState.scrollToItem(0)
     }

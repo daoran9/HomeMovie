@@ -749,11 +749,15 @@ private fun LibraryAllMoviesGrid(
 ) {
     val gridState = rememberSaveable(saver = LazyGridState.Saver) { LazyGridState() }
     var visibleCount by rememberSaveable { mutableStateOf(ALL_MOVIES_INITIAL_COUNT) }
+    var appliedResetKey by rememberSaveable { mutableStateOf<String?>(null) }
     val visibleMovies = remember(movies, visibleCount) {
         movies.take(visibleCount.coerceIn(0, movies.size))
     }
 
-    LaunchedEffect(sortState, imageMode) {
+    val resetKey = "${sortState.option.name}:${sortState.direction.name}:${imageMode.name}"
+    LaunchedEffect(resetKey) {
+        if (appliedResetKey == resetKey) return@LaunchedEffect
+        appliedResetKey = resetKey
         visibleCount = ALL_MOVIES_INITIAL_COUNT.coerceAtMost(movies.size)
         gridState.scrollToItem(0)
     }
