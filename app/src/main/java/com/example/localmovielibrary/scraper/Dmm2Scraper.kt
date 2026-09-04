@@ -1,5 +1,6 @@
 package com.example.localmovielibrary.scraper
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -89,7 +90,40 @@ class Dmm2Scraper(
         val searchJson = fetchSearchWithContent(keyword)
         val contents = searchContents(searchJson)
         logger?.invoke("DMM2 搜索返回：$keyword，结果 ${contents.length()} 条")
-        if (contents.length() == 0) error("DMM2 没有搜索到结果：$normalized / $keyword")
+        if (contents.length() == 0) {
+            /*
+             * ================================================================================
+             * 步骤2：搜索为空时直查标准内容 ID
+             * ================================================================================
+             * 目标：DMM/FANZA 搜索索引偶发返回空数组时，仍能读取标准内容 ID 对应的官方详情。
+             * 数据源：normalizeDmmSearchKeyword 生成的标准内容 ID 和 ppvContent 详情接口。
+             * 操作：
+             * 1) 只使用完整厂牌和五位序号组成的内容 ID，不改用模糊搜索结果。
+             * 2) 校验详情返回的 ID 与目标番号完全对应，避免把相似内容写入影片库。
+             * 3) 直查失败后仍按原流程报告 DMM/FANZA 未命中。
+             */
+            logger?.invoke("DMM2 搜索为空，尝试标准内容 ID 直查：$keyword")
+            val directInfo = try {
+                // 2.1 直查标准内容 ID，并复用详情解析逻辑保留官方演员、简介和图片。
+                val detailJson = fetchDetail(keyword)
+                val searchItem = buildDirectSearchItem(keyword, detailJson)
+                parseMovieInfo(normalized, searchItem, detailJson)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logger?.invoke(
+                    "DMM2 标准内容 ID 直查失败：$keyword，" +
+                        (error.message ?: error::class.java.simpleName)
+                )
+                null
+            }
+            if (directInfo != null && directInfo.title.isNotBlank()) {
+                logger?.invoke("DMM2 标准内容 ID 直查命中：$keyword")
+                return@withContext directInfo
+            }
+            logger?.invoke("DMM2 标准内容 ID 直查未命中：$keyword")
+            error("DMM2 没有搜索到结果：$normalized / $keyword")
+        }
         logSearchContents(keyword, contents)
 
         val selected = selectBestSearchResult(contents, keyword)
@@ -108,6 +142,19 @@ class Dmm2Scraper(
         val info = parseMovieInfo(normalized, selected, detailJson)
         if (info.title.isBlank()) error("DMM2 没有解析到标题：$normalized")
         info
+    }
+
+    private fun buildDirectSearchItem(contentId: String, detailJson: JSONObject): JSONObject {
+        val data = detailJson.optJSONObject("data") ?: error("DMM2 直查详情没有 data")
+        val ppv = data.optJSONObject("ppvContent") ?: error("DMM2 直查详情没有 ppvContent")
+        val returnedId = ppv.optString("id").trim()
+        if (!isExactDmmContentId(returnedId, contentId)) {
+            error("DMM2 直查详情番号不匹配：$contentId / $returnedId")
+        }
+        return JSONObject()
+            .put("id", returnedId)
+            .put("title", ppv.optString("title"))
+            .put("review", data.optJSONObject("reviewSummary") ?: JSONObject())
     }
 
     private suspend fun fetchSearch(keyword: String): JSONObject {
@@ -522,6 +569,9 @@ internal fun dmmContentIdMatchScore(contentId: String, keyword: String): Int {
     }
     return score
 }
+
+internal fun isExactDmmContentId(contentId: String, expectedId: String): Boolean =
+    contentId.trim().equals(expectedId.trim(), ignoreCase = true)
 
 /*
  * ================================================================================

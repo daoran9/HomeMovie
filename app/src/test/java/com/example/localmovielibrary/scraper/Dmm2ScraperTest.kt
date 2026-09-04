@@ -47,4 +47,21 @@ class Dmm2ScraperTest {
         assertTrue(shouldRetryDmmEmptySearchResult(1))
         assertFalse(shouldRetryDmmEmptySearchResult(2))
     }
+
+    /*
+     * ================================================================================
+     * 步骤2：验证 DMM/FANZA 直查内容 ID的严格校验边界
+     * ================================================================================
+     * 目标：搜索为空时只接受完全对应的标准内容 ID，拒绝相似前缀内容。
+     * 数据源：DMM 内容 ID 与标准番号的匹配评分。
+     * 操作：
+     * 1) 完整内容 ID 必须达到严格匹配分数。
+     * 2) 仅带额外前缀的内容 ID 不得进入直查结果。
+     */
+    @Test
+    fun directContentIdLookupRequiresExactContentId() {
+        // 2.1 仅完全相同的标准内容 ID 才允许作为直查结果。
+        assertTrue(isExactDmmContentId("msaj00002", "msaj00002"))
+        assertFalse(isExactDmmContentId("1msaj00002", "msaj00002"))
+    }
 }
