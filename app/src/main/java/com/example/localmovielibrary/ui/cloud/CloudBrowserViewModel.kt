@@ -230,10 +230,12 @@ class CloudBrowserViewModel(
                  * 数据源：批量候选视频和已有 CloudStrmRecord。
                  * 操作：
                  * 1) 已存在的 pickcode 直接跳过。
-                 * 2) 同番号标准片冲突直接跳过，避免批量任务替用户替换影片。
-                 * 3) 只生成 STRM，待后续阶段并发刮削。
+                 * 2) 同批同番号只保留第一路进入刮削，其他路延后追加到同一影片。
+                 * 3) 只生成首路 STRM，待后续阶段并发刮削。
                  */
                 val preparedScrapes = mutableListOf<PreparedCloudAdd>()
+                val deferredPlaybackSources = mutableListOf<DeferredCloudPlaybackSource>()
+                val pendingScrapeNumbers = mutableSetOf<String>()
                 for ((index, candidate) in candidates.withIndex()) {
                     ensureActive()
                     val pickcode = candidate.pickcode.orEmpty()
@@ -261,9 +263,13 @@ class CloudBrowserViewModel(
                             scrapeRepository.appendLog("整目录入库跳过已存在 pickcode：${candidate.name}")
                             continue
                         }
-                        if (recordRepository.findStandardSameNumberCandidate(candidate.name, pickcode) != null) {
-                            skippedCount += 1
-                            scrapeRepository.appendLog("整目录入库跳过同番号冲突：${candidate.name}")
+                        val number = MovieNumberExtractor.extract(candidate.name)?.uppercase()
+                        if (number != null && number in pendingScrapeNumbers) {
+                            deferredPlaybackSources += DeferredCloudPlaybackSource(
+                                item = candidate,
+                                pickcode = pickcode
+                            )
+                            scrapeRepository.appendLog("整目录入库延后同番号播放源：$number / ${candidate.name}")
                             continue
                         }
                         val generated = withContext(Dispatchers.IO) {
@@ -272,6 +278,7 @@ class CloudBrowserViewModel(
                             }
                         }
                         if (!generated.shouldScrape) {
+                            processGeneratedCloudVideoAdd(candidate, pickcode, generated)
                             successCount += 1
                             _uiState.update { state ->
                                 state.copy(addedPickcodes = state.addedPickcodes + pickcode)
@@ -283,6 +290,7 @@ class CloudBrowserViewModel(
                                 pickcode = pickcode,
                                 generated = generated
                             )
+                            generated.movieNumberHint?.uppercase()?.let { pendingScrapeNumbers += it }
                         }
                     } catch (error: CancellationException) {
                         throw error
@@ -304,70 +312,133 @@ class CloudBrowserViewModel(
                  * 2) 每个番号仍使用独立锁，避免同番号文件互相覆盖。
                  * 3) 单个任务失败只计数并继续，全部完成后统一汇总。
                  */
-                if (preparedScrapes.isNotEmpty()) {
+                if (preparedScrapes.isNotEmpty() || deferredPlaybackSources.isNotEmpty()) {
                     val scrapeConcurrency = settingsRepository.getScrapeConcurrencyLimit().coerceIn(1, 4)
                     val progressMutex = Mutex()
-                    var completedCount = totalCount - preparedScrapes.size
+                    var completedCount = successCount + skippedCount + failedCount
                     val scrapeSemaphore = Semaphore(scrapeConcurrency)
-                    coroutineScope {
-                        preparedScrapes.map { prepared ->
-                            async(Dispatchers.IO) {
-                                scrapeSemaphore.withPermit {
-                                    ensureActive()
-                                    try {
-                                        withAddLock(prepared.item.name) {
-                                            processGeneratedCloudVideoAdd(
-                                                item = prepared.item,
-                                                pickcode = prepared.pickcode,
-                                                generated = prepared.generated
-                                            )
-                                        }
-                                        progressMutex.withLock {
-                                            successCount += 1
-                                            completedCount += 1
-                                            _uiState.update { state ->
-                                                state.copy(
-                                                    addedPickcodes = state.addedPickcodes + prepared.pickcode,
-                                                    folderBatchProgress = FolderBatchProgress(
-                                                        folderName = item.name,
-                                                        current = completedCount,
-                                                        total = totalCount,
-                                                        success = successCount,
-                                                        skipped = skippedCount,
-                                                        failed = failedCount,
-                                                        currentFileName = prepared.item.name
-                                                    ),
-                                                    message = progressMessage("正在刮削 $completedCount/$totalCount：${prepared.item.name}")
+                    if (preparedScrapes.isNotEmpty()) {
+                        coroutineScope {
+                            preparedScrapes.map { prepared ->
+                                async(Dispatchers.IO) {
+                                    scrapeSemaphore.withPermit {
+                                        ensureActive()
+                                        try {
+                                            withAddLock(prepared.item.name) {
+                                                processGeneratedCloudVideoAdd(
+                                                    item = prepared.item,
+                                                    pickcode = prepared.pickcode,
+                                                    generated = prepared.generated
                                                 )
                                             }
-                                        }
-                                    } catch (error: CancellationException) {
-                                        throw error
-                                    } catch (error: Throwable) {
-                                        val message = error.message ?: error::class.java.simpleName
-                                        progressMutex.withLock {
-                                            failedCount += 1
-                                            completedCount += 1
-                                            _uiState.update { state ->
-                                                state.copy(
-                                                    folderBatchProgress = FolderBatchProgress(
-                                                        folderName = item.name,
-                                                        current = completedCount,
-                                                        total = totalCount,
-                                                        success = successCount,
-                                                        skipped = skippedCount,
-                                                        failed = failedCount,
-                                                        currentFileName = prepared.item.name
-                                                    ),
-                                                    message = progressMessage("刮削失败 $completedCount/$totalCount：${prepared.item.name}")
-                                                )
+                                            progressMutex.withLock {
+                                                successCount += 1
+                                                completedCount += 1
+                                                _uiState.update { state ->
+                                                    state.copy(
+                                                        addedPickcodes = state.addedPickcodes + prepared.pickcode,
+                                                        folderBatchProgress = FolderBatchProgress(
+                                                            folderName = item.name,
+                                                            current = completedCount,
+                                                            total = totalCount,
+                                                            success = successCount,
+                                                            skipped = skippedCount,
+                                                            failed = failedCount,
+                                                            currentFileName = prepared.item.name
+                                                        ),
+                                                        message = progressMessage("正在刮削 $completedCount/$totalCount：${prepared.item.name}")
+                                                    )
+                                                }
                                             }
+                                        } catch (error: CancellationException) {
+                                            throw error
+                                        } catch (error: Throwable) {
+                                            val message = error.message ?: error::class.java.simpleName
+                                            progressMutex.withLock {
+                                                failedCount += 1
+                                                completedCount += 1
+                                                _uiState.update { state ->
+                                                    state.copy(
+                                                        folderBatchProgress = FolderBatchProgress(
+                                                            folderName = item.name,
+                                                            current = completedCount,
+                                                            total = totalCount,
+                                                            success = successCount,
+                                                            skipped = skippedCount,
+                                                            failed = failedCount,
+                                                            currentFileName = prepared.item.name
+                                                        ),
+                                                        message = progressMessage("刮削失败 $completedCount/$totalCount：${prepared.item.name}")
+                                                    )
+                                                }
+                                            }
+                                            scrapeRepository.appendLog("整目录刮削失败：${prepared.item.name}，原因：$message")
                                         }
-                                        scrapeRepository.appendLog("整目录刮削失败：${prepared.item.name}，原因：$message")
                                     }
                                 }
+                            }.awaitAll()
+                        }
+                    }
+
+                    /*
+                     * ================================================================================
+                     * 步骤7：追加同番号播放源
+                     * ================================================================================
+                     * 目标：一部影片只刮削一次，同时保留同番号的每个网盘视频。
+                     * 数据源：步骤5延后的同番号候选和步骤6已经整理完成的影片目录。
+                     * 操作：
+                     * 1) 首路刮削完成后再生成附加 STRM，确保目标影片目录已经存在。
+                     * 2) 附加源只绑定已有影片，不重写 NFO、封面或影片卡片。
+                     */
+                    deferredPlaybackSources.forEach { deferred ->
+                        ensureActive()
+                        try {
+                            withContext(Dispatchers.IO) {
+                                withAddLock(deferred.item.name) {
+                                    val generated = strmRepository.generateStrmForVideo(deferred.item, forceDistinct = false)
+                                    processGeneratedCloudVideoAdd(deferred.item, deferred.pickcode, generated)
+                                }
                             }
-                        }.awaitAll()
+                            successCount += 1
+                            completedCount += 1
+                            _uiState.update { state ->
+                                state.copy(
+                                    addedPickcodes = state.addedPickcodes + deferred.pickcode,
+                                    folderBatchProgress = FolderBatchProgress(
+                                        folderName = item.name,
+                                        current = completedCount,
+                                        total = totalCount,
+                                        success = successCount,
+                                        skipped = skippedCount,
+                                        failed = failedCount,
+                                        currentFileName = deferred.item.name
+                                    ),
+                                    message = progressMessage("正在追加播放源 $completedCount/$totalCount：${deferred.item.name}")
+                                )
+                            }
+                            scrapeRepository.appendLog("整目录入库完成（附加播放源）：${deferred.item.name}")
+                        } catch (error: CancellationException) {
+                            throw error
+                        } catch (error: Throwable) {
+                            val message = error.message ?: error::class.java.simpleName
+                            failedCount += 1
+                            completedCount += 1
+                            _uiState.update { state ->
+                                state.copy(
+                                    folderBatchProgress = FolderBatchProgress(
+                                        folderName = item.name,
+                                        current = completedCount,
+                                        total = totalCount,
+                                        success = successCount,
+                                        skipped = skippedCount,
+                                        failed = failedCount,
+                                        currentFileName = deferred.item.name
+                                    ),
+                                    message = progressMessage("追加播放源失败 $completedCount/$totalCount：${deferred.item.name}")
+                                )
+                            }
+                            scrapeRepository.appendLog("整目录追加播放源失败：${deferred.item.name}，原因：$message")
+                        }
                     }
                 }
                 val completedMessage = "整目录入库完成：成功 $successCount，跳过 $skippedCount，失败 $failedCount"
@@ -857,6 +928,19 @@ class CloudBrowserViewModel(
         val libraryRootUri = Uri.parse(libraryRoot)
 
         if (!generated.shouldScrape) {
+            val number = generated.movieNumberHint
+                ?: MovieNumberExtractor.extract(generated.fileName)
+                ?: MovieNumberExtractor.extract(item.name)
+                ?: error("附加播放源已写入，但无法识别番号")
+            val movie = movieRepository.findMovieByNumberAndVariant(libraryRoot, number, generated.fileName)
+                ?: movieRepository.findMovieByNumber(libraryRoot, number)
+                ?: error("附加播放源已写入，但影片库中没有找到 $number")
+            recordRepository.updateStrmLocation(
+                pickcode = pickcode,
+                strmUri = generated.strmUri,
+                libraryRootUri = movie.libraryRootUri,
+                movieId = movie.id
+            )
             scrapeRepository.appendLog("附加播放源 STRM 写入完成，不单独入库：${generated.fileName}")
             return CloudAddResult(
                 pickcode = pickcode,
@@ -1111,6 +1195,11 @@ private data class PreparedCloudAdd(
     val item: Cloud115FileItem,
     val pickcode: String,
     val generated: GeneratedStrmFile
+)
+
+private data class DeferredCloudPlaybackSource(
+    val item: Cloud115FileItem,
+    val pickcode: String
 )
 
 data class PendingReplaceConflict(

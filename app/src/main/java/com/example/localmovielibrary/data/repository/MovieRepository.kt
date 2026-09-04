@@ -524,7 +524,7 @@ class MovieRepository(
             cloudStrmRecordDao.getByMovieId(movie.id)
         }
 
-        return records
+        val parts = records
             .asSequence()
             .filter { it.strmUri.isNotBlank() }
             .filter { canOpenUri(it.strmUri) }
@@ -539,6 +539,14 @@ class MovieRepository(
             .distinctBy { it.videoUri }
             .sortedWith(compareBy<MoviePlaybackPart> { it.label.playbackPartUiSortKey() }.thenBy { it.fileName.lowercase(Locale.ROOT) })
             .toList()
+        val labelCounts = parts.groupingBy { it.label }.eachCount()
+        val labelOccurrences = mutableMapOf<String, Int>()
+        return parts.map { part ->
+            if (labelCounts[part.label] == 1) return@map part
+            val index = labelOccurrences.getOrDefault(part.label, 0) + 1
+            labelOccurrences[part.label] = index
+            part.copy(label = "${part.label} $index")
+        }
     }
 
     private fun canOpenUri(uriString: String): Boolean =
