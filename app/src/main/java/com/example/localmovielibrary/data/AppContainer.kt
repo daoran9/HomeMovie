@@ -44,7 +44,9 @@ class AppContainer(context: Context) {
     val asrModelManager = AsrModelManager(appContext, settingsRepository)
     val cloud115Client = Cloud115ApiClient(Cloud115CookieProvider(appContext))
     val cloud115QrLoginClient = Cloud115QrLoginClient(appContext, settingsRepository)
-    val javlibraryWebViewFetcher = JavlibraryWebViewFetcher()
+    val javlibraryWebViewFetcher = JavlibraryWebViewFetcher().also { fetcher ->
+        fetcher.setCookieProvider(settingsRepository::getJavlibraryCookies)
+    }
     val cloudStrmRecordRepository = CloudStrmRecordRepository(
         context = appContext,
         dao = database.cloudStrmRecordDao(),

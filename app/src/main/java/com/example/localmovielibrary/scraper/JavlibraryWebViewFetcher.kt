@@ -1,6 +1,7 @@
 package com.example.localmovielibrary.scraper
 
 import android.util.Log
+import android.webkit.CookieManager
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +22,37 @@ import kotlin.coroutines.resumeWithException
  * 2) UI 层观察 currentRequest，使用隐藏 WebView 加载页面。
  */
 class JavlibraryWebViewFetcher {
+    private var cookieProvider: (() -> String)? = null
+
+    fun setCookieProvider(provider: () -> String) {
+        cookieProvider = provider
+    }
+
+    /*
+     * ================================================================================
+     * 步骤1：恢复已保存的 JavLibrary Cookie
+     * ================================================================================
+     * 目标：新建或重启 WebView 时继续使用设置页已经通过验证的会话。
+     * 数据源：应用设置中的 JavLibrary Cookie 字符串。
+     * 操作：
+     * 1) 按 Cookie 对拆分并写入 www 与裸域名。
+     * 2) flush 后再加载页面，避免旧 WebView 会话丢失 cf_clearance。
+     */
+    fun restoreCookies() {
+        val rawCookies = cookieProvider?.invoke().orEmpty()
+        if (rawCookies.isBlank()) return
+        val manager = CookieManager.getInstance()
+        rawCookies
+            .split(';')
+            .map { it.trim() }
+            .filter { it.isNotBlank() && it.contains('=') }
+            .forEach { cookie ->
+                manager.setCookie("https://www.javlibrary.com", cookie)
+                manager.setCookie("https://javlibrary.com", cookie)
+            }
+        manager.flush()
+        Log.i(TAG, "步骤1结束：已恢复 JavLibrary Cookie")
+    }
     private data class Pending(
         val request: JavlibraryWebViewRequest,
         val continuation: CancellableContinuation<String>
@@ -68,6 +100,7 @@ class JavlibraryWebViewFetcher {
      * 2) 释放当前请求并唤醒下一个排队请求。
      */
     fun complete(requestId: Long, html: String) {
+        CookieManager.getInstance().flush()
         finish(requestId) { continuation ->
             continuation.resume(html)
         }

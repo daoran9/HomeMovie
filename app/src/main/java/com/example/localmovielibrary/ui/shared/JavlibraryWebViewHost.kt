@@ -97,11 +97,12 @@ fun ScraperWebViewHost(fetcher: JavlibraryWebViewFetcher) {
                 .size(1.dp)
                 .zIndex(-1f)
         },
-        factory = { context ->
-            WebView(context).apply {
-                activeWebView = this
-                CookieManager.getInstance().setAcceptCookie(true)
-                CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+            factory = { context ->
+                WebView(context).apply {
+                    activeWebView = this
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+                    fetcher.restoreCookies()
                 settings.javaScriptEnabled = true
                 settings.domStorageEnabled = true
                 settings.databaseEnabled = true
@@ -189,6 +190,7 @@ fun ScraperWebViewHost(fetcher: JavlibraryWebViewFetcher) {
                 Log.i(TAG, "步骤3开始：加载 ${current.url.webViewSourceName()} 请求 id=${current.id}")
                 loadedRequestId = current.id
                 webView.stopLoading()
+                fetcher.restoreCookies()
                 webView.loadUrl(current.url)
                 Log.i(TAG, "步骤3结束：已提交 ${current.url.webViewSourceName()} 请求 id=${current.id}")
             }
