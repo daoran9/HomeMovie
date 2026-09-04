@@ -1392,7 +1392,7 @@ private fun sortLabel(option: HomeSortOption): String = when (option) {
     HomeSortOption.PlayDate -> "\u64AD\u653E\u65E5\u671F"
     HomeSortOption.PlayDuration -> "\u64AD\u653E\u65F6\u957F"
     HomeSortOption.PlayCount -> "\u64AD\u653E\u6B21\u6570"
-    HomeSortOption.FileName -> "\u6587\u4EF6\u540D"
+    HomeSortOption.FileName -> "名称"
     HomeSortOption.FileSize -> "\u6587\u4EF6\u5C3A\u5BF8"
     HomeSortOption.Bitrate -> "\u6BD4\u7279\u7387"
     HomeSortOption.VideoCodec -> "\u89C6\u9891\u7F16\u89E3\u7801\u5668"

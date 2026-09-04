@@ -1096,6 +1096,7 @@ class CloudBrowserViewModel(
 }
 
 enum class CloudSortOption {
+    Name,
     ModifiedTime,
     Size
 }
@@ -1105,6 +1106,11 @@ private fun List<Cloud115FileItem>.sortedByCloudOption(
     ascending: Boolean
 ): List<Cloud115FileItem> {
     val comparator = when (option) {
+        CloudSortOption.Name -> if (ascending) {
+            compareBy<Cloud115FileItem> { it.name.naturalCloudNameKey() }
+        } else {
+            compareByDescending { it.name.naturalCloudNameKey() }
+        }
         CloudSortOption.ModifiedTime -> if (ascending) {
             compareBy<Cloud115FileItem> { it.modifiedAt ?: Long.MAX_VALUE }
         } else {
@@ -1118,6 +1124,9 @@ private fun List<Cloud115FileItem>.sortedByCloudOption(
     }
     return sortedWith(comparator.thenBy { it.name.lowercase() })
 }
+
+private fun String.naturalCloudNameKey(): String =
+    lowercase().replace(Regex("\\d+")) { match -> match.value.padStart(10, '0') }
 
 data class CloudBrowserUiState(
     val items: List<Cloud115FileItem> = emptyList(),

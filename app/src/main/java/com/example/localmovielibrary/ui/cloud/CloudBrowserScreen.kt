@@ -570,6 +570,7 @@ private fun CloudFileRow(
 
 private val CloudSortOption.label: String
     get() = when (this) {
+        CloudSortOption.Name -> "名称"
         CloudSortOption.ModifiedTime -> "时间"
         CloudSortOption.Size -> "大小"
     }
