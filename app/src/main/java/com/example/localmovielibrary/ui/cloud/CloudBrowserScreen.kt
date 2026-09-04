@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.LibraryAdd
@@ -43,10 +44,12 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -106,7 +109,13 @@ fun CloudBrowserScreen(
         }
     }
 
-    BackHandler(onBack = ::handleBack)
+    BackHandler {
+        if (uiState.isVideoSelectionMode) {
+            viewModel.toggleVideoSelectionMode()
+        } else {
+            handleBack()
+        }
+    }
 
     LaunchedEffect(uiState.message) {
         uiState.message?.let {
@@ -184,21 +193,45 @@ fun CloudBrowserScreen(
             )
         }
         Column(modifier = Modifier.fillMaxSize()) {
-            CloudTopBar(
-                path = uiState.path,
-                canGoBackFolder = viewModel.canGoBackFolder(),
-                onBack = ::handleBack,
-                sortOption = uiState.sortOption,
-                onSortOptionSelected = viewModel::setSortOption,
-                sortAscending = uiState.sortAscending,
-                onToggleSortDirection = viewModel::toggleSortDirection,
-                isRandomPlaybackLoading = uiState.isRandomPlaybackLoading,
-                onPlayRandom = viewModel::playRandomFolder
-            )
+            if (uiState.isVideoSelectionMode) {
+                val currentVideoPickcodes = uiState.items
+                    .filter { item ->
+                        item.isVideoFile() &&
+                            item.pickcode != null &&
+                            item.name.trim() !in uiState.excludedVideoNames
+                    }
+                    .map { item -> item.pickcode.orEmpty() }
+                    .toSet()
+                CloudVideoSelectionTopBar(
+                    selectedCount = uiState.selectedVideoPickcodes.size,
+                    allCurrentVideosSelected = currentVideoPickcodes.isNotEmpty() &&
+                        currentVideoPickcodes.all { it in uiState.selectedVideoPickcodes },
+                    onCancel = viewModel::toggleVideoSelectionMode,
+                    onToggleSelectAll = viewModel::toggleSelectAllVisibleVideos
+                )
+            } else {
+                CloudTopBar(
+                    path = uiState.path,
+                    canGoBackFolder = viewModel.canGoBackFolder(),
+                    onBack = ::handleBack,
+                    sortOption = uiState.sortOption,
+                    onSortOptionSelected = viewModel::setSortOption,
+                    sortAscending = uiState.sortAscending,
+                    onToggleSortDirection = viewModel::toggleSortDirection,
+                    isRandomPlaybackLoading = uiState.isRandomPlaybackLoading,
+                    onPlayRandom = viewModel::playRandomFolder,
+                    onSelectVideos = viewModel::toggleVideoSelectionMode
+                )
+            }
 
             val folderProgress = uiState.folderBatchProgress
             if (uiState.addingFolderCids.isNotEmpty() && folderProgress != null) {
                 FolderBatchProgressBanner(progress = folderProgress)
+            }
+            uiState.selectedVideoBatchProgress?.let { progress ->
+                if (uiState.isSelectedVideoBatchAdding) {
+                    SelectedVideosBatchProgressBanner(progress = progress)
+                }
             }
 
             when {
@@ -218,13 +251,26 @@ fun CloudBrowserScreen(
                     addedDomesticFolderCids = uiState.addedDomesticFolderCids,
                     addingFolderCids = uiState.addingFolderCids,
                     addedFolderCids = uiState.addedFolderCids,
+                    isVideoSelectionMode = uiState.isVideoSelectionMode,
+                    selectedVideoPickcodes = uiState.selectedVideoPickcodes,
                     onOpenFolder = viewModel::openFolder,
                     onPlayVideo = onPlayVideo,
                     onAddVideo = viewModel::addVideoToLibrary,
                     onAddDomesticFolder = viewModel::addDomesticFolder,
-                    onAddFolder = viewModel::addFolderToLibrary
+                    onAddFolder = viewModel::addFolderToLibrary,
+                    onToggleVideoSelection = viewModel::toggleSelectedVideo
                 )
             }
+        }
+        if (uiState.isVideoSelectionMode) {
+            SelectedVideosActionBar(
+                selectedCount = uiState.selectedVideoPickcodes.size,
+                isAdding = uiState.isSelectedVideoBatchAdding,
+                onAddSelected = viewModel::addSelectedVideosToLibrary,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(horizontal = 16.dp, vertical = 18.dp)
+            )
         }
         SnackbarHost(
             hostState = snackbarHostState,
@@ -279,6 +325,43 @@ private fun FolderBatchProgressBanner(progress: FolderBatchProgress) {
 }
 
 @Composable
+private fun SelectedVideosBatchProgressBanner(progress: SelectedVideosBatchProgress) {
+    val fraction = if (progress.total > 0) {
+        (progress.current.toFloat() / progress.total.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.06f))
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Text(
+            text = "已选文件入库：${progress.current}/${progress.total}",
+            color = Color.White,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.SemiBold
+        )
+        LinearProgressIndicator(
+            progress = { fraction },
+            modifier = Modifier.fillMaxWidth(),
+            color = Color(0xFF76D48A),
+            trackColor = Color.White.copy(alpha = 0.12f)
+        )
+        Text(
+            text = "成功 ${progress.success} · 跳过 ${progress.skipped} · 失败 ${progress.failed}" +
+                (progress.currentFileName?.let { " · $it" } ?: ""),
+            color = Color.White.copy(alpha = 0.58f),
+            style = MaterialTheme.typography.labelSmall,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
 private fun CloudTopBar(
     path: List<CloudPathItem>,
     canGoBackFolder: Boolean,
@@ -288,7 +371,8 @@ private fun CloudTopBar(
     sortAscending: Boolean,
     onToggleSortDirection: () -> Unit,
     isRandomPlaybackLoading: Boolean,
-    onPlayRandom: () -> Unit
+    onPlayRandom: () -> Unit,
+    onSelectVideos: () -> Unit
 ) {
     var sortMenuExpanded by remember { androidx.compose.runtime.mutableStateOf(false) }
     Column(
@@ -390,6 +474,48 @@ private fun CloudTopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.padding(horizontal = 12.dp)
         )
+        TextButton(
+            onClick = onSelectVideos,
+            modifier = Modifier.padding(start = 12.dp, top = 2.dp)
+        ) {
+            Text("选择文件导入")
+        }
+    }
+}
+
+@Composable
+private fun CloudVideoSelectionTopBar(
+    selectedCount: Int,
+    allCurrentVideosSelected: Boolean,
+    onCancel: () -> Unit,
+    onToggleSelectAll: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Brush.verticalGradient(listOf(Color(0xFF101923), CloudBackground)))
+            .windowInsetsPadding(WindowInsets.statusBars)
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        IconButton(onClick = onCancel, modifier = Modifier.size(40.dp)) {
+            Icon(
+                imageVector = Icons.Rounded.Close,
+                contentDescription = "取消选择",
+                tint = Color.White,
+                modifier = Modifier.size(22.dp)
+            )
+        }
+        Text(
+            text = "已选 $selectedCount 个",
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.ExtraBold,
+            modifier = Modifier.weight(1f)
+        )
+        TextButton(onClick = onToggleSelectAll) {
+            Text(if (allCurrentVideosSelected) "全不选" else "全选")
+        }
     }
 }
 
@@ -405,17 +531,25 @@ private fun CloudFileList(
     addedDomesticFolderCids: Set<Long>,
     addingFolderCids: Set<Long>,
     addedFolderCids: Set<Long>,
+    isVideoSelectionMode: Boolean,
+    selectedVideoPickcodes: Set<String>,
     onOpenFolder: (Cloud115FileItem) -> Unit,
     onPlayVideo: (Cloud115FileItem) -> Unit,
     onAddVideo: (Cloud115FileItem) -> Unit,
     onAddDomesticFolder: (Cloud115FileItem) -> Unit,
-    onAddFolder: (Cloud115FileItem) -> Unit
+    onAddFolder: (Cloud115FileItem) -> Unit,
+    onToggleVideoSelection: (Cloud115FileItem) -> Unit
 ) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(3.dp),
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp)
+        contentPadding = PaddingValues(
+            start = 12.dp,
+            top = 8.dp,
+            end = 12.dp,
+            bottom = if (isVideoSelectionMode) 88.dp else 8.dp
+        )
     ) {
         items(
             items = items,
@@ -439,11 +573,14 @@ private fun CloudFileList(
                 showCloudFolderAdd = !isDomesticRoot && item.isDirectory && item.cid != null,
                 isCloudFolderAdding = item.cid != null && item.cid in addingFolderCids,
                 isCloudFolderAdded = item.cid != null && item.cid in addedFolderCids,
+                isVideoSelectionMode = isVideoSelectionMode,
+                isVideoSelected = item.pickcode != null && item.pickcode in selectedVideoPickcodes,
                 onOpenFolder = { onOpenFolder(item) },
                 onPlayVideo = { onPlayVideo(item) },
                 onAddVideo = { onAddVideo(item) },
                 onAddDomesticFolder = { onAddDomesticFolder(item) },
-                onAddFolder = { onAddFolder(item) }
+                onAddFolder = { onAddFolder(item) },
+                onToggleVideoSelection = { onToggleVideoSelection(item) }
             )
         }
     }
@@ -462,11 +599,14 @@ private fun CloudFileRow(
     showCloudFolderAdd: Boolean,
     isCloudFolderAdding: Boolean,
     isCloudFolderAdded: Boolean,
+    isVideoSelectionMode: Boolean,
+    isVideoSelected: Boolean,
     onOpenFolder: () -> Unit,
     onPlayVideo: () -> Unit,
     onAddVideo: () -> Unit,
     onAddDomesticFolder: () -> Unit,
-    onAddFolder: () -> Unit
+    onAddFolder: () -> Unit,
+    onToggleVideoSelection: () -> Unit
 ) {
     val context = LocalContext.current
     val clipboardManager = LocalClipboardManager.current
@@ -490,7 +630,9 @@ private fun CloudFileRow(
                                 if (folderCid.isNotBlank()) folderMenuExpanded = true
                             }
                         )
-                        item.isVideoFile() -> Modifier.clickable(onClick = onPlayVideo)
+                        item.isVideoFile() && isVideoSelectionMode && !isExcludedVideo ->
+                            Modifier.clickable(onClick = onToggleVideoSelection)
+                        item.isVideoFile() && !isVideoSelectionMode -> Modifier.clickable(onClick = onPlayVideo)
                         else -> Modifier
                     }
                 )
@@ -531,6 +673,11 @@ private fun CloudFileRow(
                 )
             }
             when {
+                isVideoSelectionMode && item.isVideoFile() && !isExcludedVideo -> Checkbox(
+                    checked = isVideoSelected,
+                    onCheckedChange = { onToggleVideoSelection() }
+                )
+                isVideoSelectionMode -> Unit
                 showDomesticAdd -> AddVideoButton(
                     isAdding = isDomesticAdding,
                     isAdded = isDomesticAdded,
@@ -564,6 +711,36 @@ private fun CloudFileRow(
                     }
                 }
             )
+        }
+    }
+}
+
+@Composable
+private fun SelectedVideosActionBar(
+    selectedCount: Int,
+    isAdding: Boolean,
+    onAddSelected: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Button(
+        onClick = onAddSelected,
+        enabled = selectedCount > 0 && !isAdding,
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(10.dp)
+    ) {
+        if (isAdding) {
+            CircularProgressIndicator(
+                color = Color.White,
+                strokeWidth = 2.dp,
+                modifier = Modifier.size(18.dp)
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Rounded.LibraryAdd,
+                contentDescription = null,
+                modifier = Modifier.size(18.dp)
+            )
+            Text("导入已选（$selectedCount）", modifier = Modifier.padding(start = 8.dp))
         }
     }
 }

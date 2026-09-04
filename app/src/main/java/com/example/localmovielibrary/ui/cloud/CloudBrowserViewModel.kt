@@ -53,6 +53,8 @@ class CloudBrowserViewModel(
     private var isMissavCloudAddRunning = false
     private var randomPlaybackJob: Job? = null
     private var folderLibraryAddJob: Job? = null
+    private var selectedVideoLibraryAddJob: Job? = null
+    private val selectedVideosByPickcode = linkedMapOf<String, Cloud115FileItem>()
 
     init {
         loadCurrent()
@@ -468,6 +470,176 @@ class CloudBrowserViewModel(
                 _uiState.update { state ->
                     state.copy(addingFolderCids = state.addingFolderCids - folderCid)
                 }
+            }
+        }
+    }
+
+    fun toggleVideoSelectionMode() {
+        if (_uiState.value.isSelectedVideoBatchAdding) {
+            _uiState.update { it.copy(message = progressMessage("已选文件正在入库，暂不能退出选择")) }
+            return
+        }
+        val nextSelectionMode = !_uiState.value.isVideoSelectionMode
+        if (!nextSelectionMode) {
+            selectedVideosByPickcode.clear()
+        }
+        _uiState.update {
+            it.copy(
+                isVideoSelectionMode = nextSelectionMode,
+                selectedVideoPickcodes = selectedVideosByPickcode.keys.toSet(),
+                selectedVideoBatchProgress = null
+            )
+        }
+    }
+
+    fun toggleSelectedVideo(item: Cloud115FileItem) {
+        val pickcode = item.pickcode?.takeIf { it.isNotBlank() } ?: return
+        if (item.isDirectory || !item.isSupportedCloudVideoFile()) return
+        if (_uiState.value.isSelectedVideoBatchAdding) return
+        if (selectedVideosByPickcode.containsKey(pickcode)) {
+            selectedVideosByPickcode.remove(pickcode)
+        } else {
+            selectedVideosByPickcode[pickcode] = item
+        }
+        _uiState.update { it.copy(selectedVideoPickcodes = selectedVideosByPickcode.keys.toSet()) }
+    }
+
+    fun toggleSelectAllVisibleVideos() {
+        if (_uiState.value.isSelectedVideoBatchAdding) return
+        val excludedVideoNames = settingsRepository.getCloudExcludedVideoNames()
+        val visibleVideos = distinctSelectedCloudVideoItemsByPickcode(
+            _uiState.value.items.filter { item -> item.name.trim() !in excludedVideoNames }
+        )
+        if (visibleVideos.isEmpty()) {
+            _uiState.update { it.copy(message = progressMessage("当前目录没有可导入的视频")) }
+            return
+        }
+        val visiblePickcodes = visibleVideos.mapTo(linkedSetOf()) { it.pickcode.orEmpty() }
+        if (visiblePickcodes.all { it in selectedVideosByPickcode }) {
+            visiblePickcodes.forEach(selectedVideosByPickcode::remove)
+        } else {
+            visibleVideos.forEach { item ->
+                item.pickcode?.let { pickcode -> selectedVideosByPickcode[pickcode] = item }
+            }
+        }
+        _uiState.update { it.copy(selectedVideoPickcodes = selectedVideosByPickcode.keys.toSet()) }
+    }
+
+    /*
+     * ================================================================================
+     * 步骤8：按已选 pickcode 串行导入视频
+     * ================================================================================
+     * 目标：让用户从 115 文件列表中只导入勾选的视频，跳过不需要的同目录文件。
+     * 数据源：选择模式保留的 Cloud115FileItem 和每个视频唯一的 pickcode。
+     * 操作：
+     * 1) 按 pickcode 去重后复用单视频 STRM、刮削和播放源绑定链路。
+     * 2) 串行处理同番号候选，让首路先完成刮削，后续路自动追加为播放源。
+     */
+    fun addSelectedVideosToLibrary() {
+        if (_uiState.value.isSelectedVideoBatchAdding) return
+        val candidates = distinctSelectedCloudVideoItemsByPickcode(selectedVideosByPickcode.values)
+        if (candidates.isEmpty()) {
+            _uiState.update { it.copy(message = progressMessage("请先勾选至少一个视频")) }
+            return
+        }
+        val libraryRoot = settingsRepository.getLibraryRootUri()
+        if (libraryRoot.isNullOrBlank()) {
+            _uiState.update { it.copy(message = progressMessage("请先到设置页选择影片库目录")) }
+            return
+        }
+        if (settingsRepository.getStrmTreeUri().isNullOrBlank()) {
+            _uiState.update { it.copy(message = progressMessage("请先到设置页选择 STRM 保存目录")) }
+            return
+        }
+        if (settingsRepository.getDefaultScrapeSource() == ScrapeSource.Missav) {
+            _uiState.update { it.copy(message = progressMessage("MissAV 刮削需要逐部网页验证，暂不支持已选文件批量入库")) }
+            return
+        }
+
+        selectedVideoLibraryAddJob = viewModelScope.launch {
+            Log.i(TAG, "开始导入已选115视频，数量=${candidates.size}")
+            var successCount = 0
+            var skippedCount = 0
+            var failedCount = 0
+            val completedPickcodes = mutableSetOf<String>()
+            _uiState.update {
+                it.copy(
+                    isSelectedVideoBatchAdding = true,
+                    selectedVideoBatchProgress = SelectedVideosBatchProgress(total = candidates.size),
+                    message = progressMessage("开始导入已选 ${candidates.size} 个视频")
+                )
+            }
+            try {
+                candidates.forEachIndexed { index, item ->
+                    val pickcode = item.pickcode.orEmpty()
+                    _uiState.update {
+                        it.copy(
+                            selectedVideoBatchProgress = SelectedVideosBatchProgress(
+                                current = index + 1,
+                                total = candidates.size,
+                                success = successCount,
+                                skipped = skippedCount,
+                                failed = failedCount,
+                                currentFileName = item.name
+                            ),
+                            message = progressMessage("正在导入 ${index + 1}/${candidates.size}：${item.name}")
+                        )
+                    }
+                    try {
+                        // 8.1 已完成入库的 pickcode 无需重复写入 STRM。
+                        if (recordRepository.isFinalizedInLibrary(pickcode, libraryRoot)) {
+                            skippedCount += 1
+                            completedPickcodes += pickcode
+                            scrapeRepository.appendLog("已选文件入库跳过已存在 pickcode：${item.name}")
+                        } else {
+                            // 8.2 复用单视频链路，确保文件名、大小和 pickcode 均来自115文件项。
+                            withContext(Dispatchers.IO) {
+                                withAddLock(item.name) {
+                                    processCloudVideoAdd(item, pickcode, forceDistinct = false)
+                                }
+                            }
+                            successCount += 1
+                            completedPickcodes += pickcode
+                            _uiState.update { state ->
+                                state.copy(addedPickcodes = state.addedPickcodes + pickcode)
+                            }
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Throwable) {
+                        failedCount += 1
+                        val message = error.message ?: error::class.java.simpleName
+                        scrapeRepository.appendLog("已选文件入库失败：${item.name} / $pickcode，原因：$message")
+                    }
+                }
+                val message = "已选文件入库完成：成功 $successCount，跳过 $skippedCount，失败 $failedCount"
+                scrapeRepository.appendLog(message)
+                completedPickcodes.forEach(selectedVideosByPickcode::remove)
+                _uiState.update {
+                    it.copy(
+                        isVideoSelectionMode = selectedVideosByPickcode.isNotEmpty(),
+                        selectedVideoPickcodes = selectedVideosByPickcode.keys.toSet(),
+                        isSelectedVideoBatchAdding = false,
+                        selectedVideoBatchProgress = SelectedVideosBatchProgress(
+                            current = candidates.size,
+                            total = candidates.size,
+                            success = successCount,
+                            skipped = skippedCount,
+                            failed = failedCount
+                        ),
+                        message = progressMessage(message)
+                    )
+                }
+                Log.i(TAG, "已选115视频导入完成，成功=$successCount，跳过=$skippedCount，失败=$failedCount")
+            } catch (error: CancellationException) {
+                Log.i(TAG, "已选115视频导入已取消")
+                _uiState.update {
+                    it.copy(
+                        isSelectedVideoBatchAdding = false,
+                        message = progressMessage("已选文件入库已取消")
+                    )
+                }
+                throw error
             }
         }
     }
@@ -1142,6 +1314,10 @@ data class CloudBrowserUiState(
     val addingFolderCids: Set<Long> = emptySet(),
     val addedFolderCids: Set<Long> = emptySet(),
     val folderBatchProgress: FolderBatchProgress? = null,
+    val isVideoSelectionMode: Boolean = false,
+    val selectedVideoPickcodes: Set<String> = emptySet(),
+    val isSelectedVideoBatchAdding: Boolean = false,
+    val selectedVideoBatchProgress: SelectedVideosBatchProgress? = null,
     val isRandomPlaybackLoading: Boolean = false,
     val randomPlaybackItems: List<Cloud115FileItem>? = null,
     val hiddenMissavRequest: HiddenMissavWebRequest? = null,
@@ -1183,6 +1359,30 @@ data class FolderBatchProgress(
     val failed: Int = 0,
     val currentFileName: String? = null
 )
+
+data class SelectedVideosBatchProgress(
+    val current: Int = 0,
+    val total: Int = 0,
+    val success: Int = 0,
+    val skipped: Int = 0,
+    val failed: Int = 0,
+    val currentFileName: String? = null
+)
+
+internal fun distinctSelectedCloudVideoItemsByPickcode(
+    items: Collection<Cloud115FileItem>
+): List<Cloud115FileItem> =
+    items.asSequence()
+        .filter { item ->
+            item.pickcode?.isNotBlank() == true && item.isSupportedCloudVideoFile()
+        }
+        .distinctBy { it.pickcode }
+        .toList()
+
+private fun Cloud115FileItem.isSupportedCloudVideoFile(): Boolean =
+    !isDirectory && Cloud115StrmRepository.VIDEO_EXTENSIONS.any { extension ->
+        name.endsWith(extension, ignoreCase = true)
+    }
 
 data class PendingMissavScrape(
     val libraryRootUri: String,
