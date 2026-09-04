@@ -264,13 +264,22 @@ private fun compareBySortOption(left: MovieEntity, right: MovieEntity, option: H
         HomeSortOption.PlayDate -> compareValues(left.updatedAt.takeIf { left.isWatched } ?: 0L, right.updatedAt.takeIf { right.isWatched } ?: 0L)
         HomeSortOption.PlayDuration -> compareNullable(left.runtimeMinutes, right.runtimeMinutes)
         HomeSortOption.PlayCount -> compareValues(if (left.isWatched) 1 else 0, if (right.isWatched) 1 else 0)
-        HomeSortOption.FileName -> compareStrings(left.videoName, right.videoName)
+        HomeSortOption.FileName -> compareNaturalStrings(
+            left.sortTitle.ifBlank { left.videoName },
+            right.sortTitle.ifBlank { right.videoName }
+        )
         HomeSortOption.Title -> compareStrings(left.sortTitle.ifBlank { left.title }, right.sortTitle.ifBlank { right.title })
         HomeSortOption.Random -> compareValues(left.id.stableRandomKey(), right.id.stableRandomKey())
     }
 
 private fun compareStrings(left: String, right: String): Int =
     left.lowercase().compareTo(right.lowercase())
+
+private fun compareNaturalStrings(left: String, right: String): Int =
+    left.naturalSortKey().compareTo(right.naturalSortKey())
+
+private fun String.naturalSortKey(): String =
+    lowercase().replace(Regex("\\d+")) { match -> match.value.padStart(10, '0') }
 
 private fun <T : Comparable<T>> compareNullable(left: T?, right: T?): Int =
     when {
