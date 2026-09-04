@@ -195,7 +195,7 @@ class Cloud115StrmRepository(
                     root = movieDirectory,
                     videoName = item.name,
                     pickcode = pickcode,
-                    forcedBaseName = movieDirectory.name
+                    forcedBaseName = "${movieDirectory.name}_$pickcode"
                 )
                 recordRepository.upsertGenerated(
                     pickcode = pickcode,
