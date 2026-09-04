@@ -1,6 +1,8 @@
 ﻿package com.example.localmovielibrary.data.repository
 
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.example.localmovielibrary.data.local.MovieEntity
@@ -892,8 +894,8 @@ class StrmScrapeRepository(
 
             val imageReferer = info.imageReferer()
             val poster = info.posterUrl.ifBlank { info.thumbUrl }
+            val posterName = "$baseName-poster.jpg"
             if (poster.isNotBlank()) {
-                val posterName = "$baseName-poster.jpg"
                 logStore.append("Download poster: $poster")
                 tryDownloadImageToFile(movieDirectory, posterName, poster, imageReferer, "Poster")
             } else {
@@ -903,11 +905,14 @@ class StrmScrapeRepository(
             if (info.thumbUrl.isNotBlank()) {
                 val thumbName = "$baseName-thumb.jpg"
                 logStore.append("Download thumb: ${info.thumbUrl}")
-                tryDownloadImageToFile(movieDirectory, thumbName, info.thumbUrl, imageReferer, "Thumb")
+                val thumbWritten = tryDownloadImageToFile(movieDirectory, thumbName, info.thumbUrl, imageReferer, "Thumb")
 
                 val fanartName = "$baseName-fanart.jpg"
                 logStore.append("Copy thumb as fanart: $fanartName")
                 tryDownloadImageToFile(movieDirectory, fanartName, info.thumbUrl, imageReferer, "Fanart")
+                if (thumbWritten && shouldBuildPortraitPosterFromWideCover(poster, info.thumbUrl)) {
+                    writePortraitPosterFromWideCover(movieDirectory, posterName, thumbName)
+                }
             } else {
                 logStore.append("Thumb URL is blank; skipped")
             }
@@ -960,8 +965,11 @@ class StrmScrapeRepository(
         }
         if (info.thumbUrl.isNotBlank()) {
             logStore.append("Refresh thumb: ${info.thumbUrl}")
-            tryDownloadImageToFile(directory, thumbName, info.thumbUrl, imageReferer, "Thumb")
+            val thumbWritten = tryDownloadImageToFile(directory, thumbName, info.thumbUrl, imageReferer, "Thumb")
             tryDownloadImageToFile(directory, fanartName, info.thumbUrl, imageReferer, "Fanart")
+            if (thumbWritten && shouldBuildPortraitPosterFromWideCover(poster, info.thumbUrl)) {
+                writePortraitPosterFromWideCover(directory, posterName, thumbName)
+            }
         } else if (replacesJavdbMetadata || info.source == JAVDB_ACTOR_EVIDENCE_SOURCE) {
             deleteScrapeImage(directory, thumbName, "JavDB thumb")
             deleteScrapeImage(directory, fanartName, "JavDB fanart")
@@ -1595,6 +1603,53 @@ class StrmScrapeRepository(
         }.isSuccess
     }
 
+    /*
+     * ================================================================================
+     * 步骤8：从高清包装图生成竖版海报
+     * ================================================================================
+     * 目标：避免 JavLibrary 和 JavBus 把 147x200 的预览小图当作影片海报。
+     * 数据源：同一来源下载的横版高清包装图，右侧为正面竖版封面。
+     * 操作：
+     * 1) 仅处理已由 URL 规则确认的 DMM/JavBus 同源图片对。
+     * 2) 按 2:3 比例截取右侧正面封面，并覆盖低清 poster 文件。
+     */
+    private fun writePortraitPosterFromWideCover(
+        directory: DocumentFile,
+        posterName: String,
+        thumbName: String
+    ) {
+        logStore.append("开始从高清包装图生成竖版海报：$posterName")
+        val thumbFile = directory.findFile(thumbName)
+        if (thumbFile == null) {
+            logStore.append("高清包装图不存在，保留原海报：$posterName")
+            return
+        }
+        val source = context.contentResolver.openInputStream(thumbFile.uri)?.use(BitmapFactory::decodeStream)
+        if (source == null || source.width <= source.height) {
+            source?.recycle()
+            logStore.append("高清包装图不是横版，保留原海报：$posterName")
+            return
+        }
+
+        val cropWidth = (source.height * PORTRAIT_POSTER_ASPECT_RATIO).toInt().coerceIn(1, source.width)
+        val crop = Bitmap.createBitmap(source, source.width - cropWidth, 0, cropWidth, source.height)
+        source.recycle()
+        runCatching {
+            directory.findFile(posterName)?.delete()
+            val posterFile = directory.createFile("image/jpeg", posterName)
+                ?: error("无法创建图片：$posterName")
+            context.contentResolver.openOutputStream(posterFile.uri, "wt")?.use { output ->
+                crop.compress(Bitmap.CompressFormat.JPEG, PORTRAIT_POSTER_JPEG_QUALITY, output)
+            } ?: error("无法写入图片：$posterName")
+        }.onSuccess {
+            logStore.append("高清竖版海报已生成：$posterName")
+        }.onFailure { error ->
+            logStore.append("高清竖版海报生成失败，保留原海报：${error.message ?: error::class.java.simpleName}")
+        }
+        crop.recycle()
+        logStore.append("高清包装图海报处理完成：$posterName")
+    }
+
     private fun isJavdbMetadataNfo(file: DocumentFile): Boolean =
         context.contentResolver.openInputStream(file.uri)
             ?.bufferedReader()
@@ -1692,6 +1747,8 @@ class StrmScrapeRepository(
         const val JAVBUS_BASE_URL = "https://www.javbus.com/"
         const val JAVDB_BASE_URL = "https://javdb.com/"
         const val JAVLIBRARY_BASE_URL = "https://www.javlibrary.com/"
+        const val PORTRAIT_POSTER_ASPECT_RATIO = 0.6666667f
+        const val PORTRAIT_POSTER_JPEG_QUALITY = 96
         /**
          * ================================================================================
          * 步骤1：定义全库演员资料源顺序
@@ -1713,6 +1770,30 @@ class StrmScrapeRepository(
         const val DMM_FANZA_AVATAR_TIMEOUT_MS = 8_000L
         const val WEBVIEW_ALIAS_TIMEOUT_MS = 75_000L
     }
+}
+
+/*
+ * ================================================================================
+ * 步骤1：识别低清竖图与高清包装图
+ * ================================================================================
+ * 目标：只处理 JavLibrary 和 JavBus 已知的一对同源封面地址，不影响普通竖版海报。
+ * 数据源：资料源返回的 posterUrl 和 thumbUrl。
+ * 操作：
+ * 1) DMM 的 pl.jpg 与 ps.jpg 视为同一包装图的高清横图和低清预览图。
+ * 2) JavBus 的 cover/{id}_b 与 thumb/{id} 视为同一包装图的高清横图和低清预览图。
+ */
+internal fun shouldBuildPortraitPosterFromWideCover(posterUrl: String, thumbUrl: String): Boolean {
+    val poster = posterUrl.substringBefore('?').lowercase()
+    val thumb = thumbUrl.substringBefore('?').lowercase()
+    if (thumb.contains("dmm.co.jp/") && thumb.endsWith("pl.jpg") && poster == thumb.removeSuffix("pl.jpg") + "ps.jpg") {
+        return true
+    }
+
+    val javbusCover = Regex("^(https?://[^/]+)/pics/cover/([^/?#]+)_b(\\.[a-z0-9]+)$")
+        .find(thumb)
+        ?: return false
+    val expectedPoster = "${javbusCover.groupValues[1]}/pics/thumb/${javbusCover.groupValues[2]}${javbusCover.groupValues[3]}"
+    return poster == expectedPoster
 }
 
 data class ActorAvatarUpdateResult(
