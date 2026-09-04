@@ -872,7 +872,7 @@ private fun CastCard(name: String, avatarUri: String?, refreshVersion: Int, onCl
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .height(104.dp)
+                .aspectRatio(1f)
                 .clip(RoundedCornerShape(3.dp))
                 .background(DetailPanel),
             contentAlignment = Alignment.Center

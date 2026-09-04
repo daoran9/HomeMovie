@@ -1092,7 +1092,7 @@ private fun ActorSummaryCard(summary: MovieMetadataSummary, avatarUri: String?, 
         Box(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(0.78f)
+                .aspectRatio(1f)
                 .clip(RoundedCornerShape(9.dp))
                 .background(MoviesSurface),
             contentAlignment = Alignment.Center
