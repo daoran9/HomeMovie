@@ -177,6 +177,27 @@ class NfoWriterTest {
     }
 
     @Test
+    fun mergeActorDisplayNames_removesStoredActorFieldLabel() {
+        val existingNfo = """
+            <movie>
+              <actor><name>演员:（櫻井美優）</name></actor>
+            </movie>
+        """.trimIndent()
+
+        val updated = NfoWriter.mergeActorDisplayNames(
+            existingNfo,
+            ScrapedMovieInfo(
+                number = "MIGD-092",
+                title = "示例影片",
+                actors = listOf("櫻井美優")
+            )
+        )
+
+        assertTrue(updated.contains("<name>櫻井美優</name>"))
+        assertFalse(updated.contains("演员:"))
+    }
+
+    @Test
     fun mergeActorDisplayNames_replacesStoredCategoryActorWithItsKnownAlias() {
         val existingNfo = """
             <movie>

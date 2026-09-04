@@ -62,19 +62,8 @@ class MovieScraperRegistryTest {
         assertEquals(listOf("官方演员"), info.actors)
     }
 
-    /*
-     * =============================================================================
-     * 步骤1：验证 MSAJ 的 JavLibrary 演员校准
-     * =============================================================================
-     * 目标：DMM/FANZA 命中时，MSAJ 仅以 JavLibrary 覆盖演员与别名。
-     * 数据源：模拟 DMM2、旧 DMM、JavLibrary、JavBus 和 JavDB 结果。
-     * 操作：
-     * 1) 验证标题和时长仍保留官方来源。
-     * 2) 验证只请求 JavLibrary，且演员使用其结果。
-     */
     @Test
-    fun scrapeWithDmmPriorityUsesJavlibraryActorsForMsajOfficialHit() = runBlocking {
-        // 1.1 记录请求顺序，确保没有进入通用外部后备融合。
+    fun scrapeWithDmmPriorityStopsExternalSourcesForMsajOfficialHit() = runBlocking {
         val calls = mutableListOf<ScrapeSource>()
         val registry = MovieScraperRegistry(
             listOf(
@@ -124,101 +113,11 @@ class MovieScraperRegistryTest {
             )
         )
 
-        // 1.2 MSAJ 只引入 JavLibrary 的演员证据，影片元数据继续按官方规则融合。
         val info = registry.scrapeWithDmmPriority("MSAJ-004")
 
-        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary), calls)
+        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm), calls)
         assertEquals("官方标题", info.title)
         assertEquals("120", info.runtime)
-        assertEquals(listOf("JavLibrary 演员"), info.actors)
-        assertEquals(listOf("JavLibrary 别名"), info.actorAliases["JavLibrary 演员"])
-    }
-
-    /*
-     * =============================================================================
-     * 步骤2：验证 MSAJ JavLibrary 无演员时的回退
-     * =============================================================================
-     * 目标：JavLibrary 详情缺少演员时，不丢失 DMM/FANZA 的原有演员。
-     * 数据源：模拟 DMM2、旧 DMM 和空演员 JavLibrary 结果。
-     * 操作：
-     * 1) 让 JavLibrary 成功返回详情但不含演员。
-     * 2) 验证最终演员仍来自 DMM2。
-     */
-    @Test
-    fun scrapeWithDmmPriorityKeepsOfficialActorsWhenMsajJavlibraryHasNoCast() = runBlocking {
-        // 2.1 记录 MSAJ 额外来源调用，确认空结果被安全忽略。
-        val calls = mutableListOf<ScrapeSource>()
-        val registry = MovieScraperRegistry(
-            listOf(
-                RecordingInfoMovieScraper(
-                    ScrapeSource.Dmm2,
-                    calls,
-                    ScrapedMovieInfo(
-                        number = "MSAJ-018",
-                        title = "官方标题",
-                        actors = listOf("DMM 演员"),
-                        source = "dmm2"
-                    )
-                ),
-                RecordingInfoMovieScraper(
-                    ScrapeSource.Dmm,
-                    calls,
-                    ScrapedMovieInfo(number = "MSAJ-018", title = "旧 DMM 标题", source = "dmm")
-                ),
-                RecordingInfoMovieScraper(
-                    ScrapeSource.Javlibrary,
-                    calls,
-                    ScrapedMovieInfo(number = "MSAJ-018", title = "JavLibrary 标题", source = "javlibrary")
-                )
-            )
-        )
-
-        // 2.2 空演员不改变官方演员，避免一次来源异常清空现有身份。
-        val info = registry.scrapeWithDmmPriority("MSAJ-018")
-
-        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary), calls)
-        assertEquals(listOf("DMM 演员"), info.actors)
-    }
-
-    /*
-     * =============================================================================
-     * 步骤3：验证 MSAJ JavLibrary 失败时的回退
-     * =============================================================================
-     * 目标：JavLibrary 请求失败时，不影响 DMM/FANZA 的正常刮削结果。
-     * 数据源：模拟 DMM2、旧 DMM 和失败的 JavLibrary 请求。
-     * 操作：
-     * 1) 让 JavLibrary 抛出请求异常。
-     * 2) 验证最终演员仍来自 DMM2。
-     */
-    @Test
-    fun scrapeWithDmmPriorityKeepsOfficialActorsWhenMsajJavlibraryFails() = runBlocking {
-        // 3.1 失败来源仍应被记录，但不能进入 JavBus 或 JavDB 的通用后备流程。
-        val calls = mutableListOf<ScrapeSource>()
-        val registry = MovieScraperRegistry(
-            listOf(
-                RecordingInfoMovieScraper(
-                    ScrapeSource.Dmm2,
-                    calls,
-                    ScrapedMovieInfo(
-                        number = "MSAJ-012",
-                        title = "官方标题",
-                        actors = listOf("DMM 演员"),
-                        source = "dmm2"
-                    )
-                ),
-                RecordingInfoMovieScraper(
-                    ScrapeSource.Dmm,
-                    calls,
-                    ScrapedMovieInfo(number = "MSAJ-012", title = "旧 DMM 标题", source = "dmm")
-                ),
-                RecordingInfoMovieScraper(ScrapeSource.Javlibrary, calls, fail = true)
-            )
-        )
-
-        // 3.2 JavLibrary 网络或解析失败时，DMM/FANZA 演员继续可用。
-        val info = registry.scrapeWithDmmPriority("MSAJ-012")
-
-        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary), calls)
         assertEquals(listOf("DMM 演员"), info.actors)
     }
 

@@ -40,7 +40,6 @@ import com.example.localmovielibrary.util.displayNumberWithVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
 import com.example.localmovielibrary.util.playbackSourceSuffix
 import com.example.localmovielibrary.scraper.primaryActorName
-import com.example.localmovielibrary.scraper.usesJavlibraryActorAuthority
 import com.example.localmovielibrary.scraper.withSupplementalActors
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -59,6 +58,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import okhttp3.OkHttpClient
+import java.net.URI
+import java.util.Locale
 import kotlin.system.measureTimeMillis
 
 class StrmScrapeRepository(
@@ -330,16 +331,10 @@ class StrmScrapeRepository(
         } else {
             scraperRegistry.scrape(source, number)
         }
-        val refreshMsajActorAvatars = automaticPriority && usesJavlibraryActorAuthority(number)
-        if (refreshMsajActorAvatars) {
-            logStore.append("MSAJ 使用 JavLibrary 别名优先刷新官方头像：$number")
-        }
         val info = scrapedInfo.withResolvedActorAliases(
             downloadActorAvatars(
                 scrapedInfo,
                 allowExternalActorSources = !automaticPriority || scrapedInfo.source !in setOf("dmm2", "dmm"),
-                forceRefresh = refreshMsajActorAvatars,
-                preferKnownAliasesForDmm = refreshMsajActorAvatars,
                 reuseMergedActorIdentities = true
             )
         )
@@ -454,16 +449,10 @@ class StrmScrapeRepository(
         } else {
             scraperRegistry.scrape(source, number)
         }
-        val refreshMsajActorAvatars = automaticPriority && usesJavlibraryActorAuthority(number)
-        if (refreshMsajActorAvatars) {
-            logStore.append("MSAJ 使用 JavLibrary 别名优先刷新官方头像：$number")
-        }
         val info = scrapedInfo.withResolvedActorAliases(
             downloadActorAvatars(
                 scrapedInfo,
                 allowExternalActorSources = automaticPriority.not() || scrapedInfo.source !in setOf("dmm2", "dmm"),
-                forceRefresh = refreshMsajActorAvatars,
-                preferKnownAliasesForDmm = refreshMsajActorAvatars
             )
         )
         logStore.append("Rescrape metadata fetched: ${info.title.ifBlank { number }}")
@@ -550,17 +539,10 @@ class StrmScrapeRepository(
                         excludedSources = excludedSources
                     )
                 }
-                val refreshMsajActorAvatars = source != ScrapeSource.Missav &&
-                    usesJavlibraryActorAuthority(number)
-                if (refreshMsajActorAvatars) {
-                    logStore.append("MSAJ 使用 JavLibrary 别名优先刷新官方头像：$number")
-                }
                 val info = scrapedInfo.withResolvedActorAliases(
                     downloadActorAvatars(
                         scrapedInfo,
                         allowExternalActorSources = scrapedInfo.source !in setOf("dmm2", "dmm"),
-                        forceRefresh = refreshMsajActorAvatars,
-                        preferKnownAliasesForDmm = refreshMsajActorAvatars,
                         reuseMergedActorIdentities = true
                     )
                 )
@@ -711,29 +693,31 @@ class StrmScrapeRepository(
                 logStore.append("Query metadata sources for actor avatars: $number")
                 /*
                  * ================================================================================
-                 * 步骤1：收集全量演员资料源
+                 * 步骤1：按影片刮削规则查询演员资料
                  * ================================================================================
-                 * 目标：全库任务不能因 DMM2 已有封面或头像就跳过其它来源的多人演员。
-                 * 数据源：DMM/FANZA、JavDB、JavLibrary、JavBus、旧 DMM 和厂商官网的同番号详情。
+                 * 目标：全库头像任务不能绕过 DMM/FANZA 严格番号优先规则。
+                 * 数据源：DMM/FANZA；仅当官方未命中时再查询 JavLibrary、JavBus、JavDB。
                  * 操作：
-                 * 1) 无论首源是否完整，都读取全部非 MissAV 资料源。
-                * 2) 只按同名或来源明确给出的别名融合，禁止按数量或位置猜测。
+                 * 1) 复用影片刮削的官方命中与外部后备分支。
+                 * 2) 官方命中时只更新官方确认的演员和头像，不回写外部演员或别名。
                  */
-                val info = scraperRegistry.scrapeWithFallback(
-                    preferred = ScrapeSource.Dmm2,
+                val info = scraperRegistry.scrapeWithDmmPriority(
                     number = number,
-                    excludedSources = excludedSourcesFor(number),
-                    fallbackOrder = ACTOR_AVATAR_METADATA_FALLBACK_ORDER,
-                    collectAllSources = true
+                    excludedSources = excludedSourcesFor(number)
                 )
                 scrapedMovies += 1
-                val avatarInfo = info
+                val libraryActorInfo = info
                     .withLibraryActors(movie.actors)
-                    .withExternalActorsWhenMissing(number)
+                val avatarInfo = if (info.source in setOf("dmm2", "dmm")) {
+                    libraryActorInfo
+                } else {
+                    libraryActorInfo.withExternalActorsWhenMissing(number)
+                }
                 val resolvedInfo = avatarInfo.withResolvedActorAliases(downloadActorAvatars(
                     avatarInfo,
                     forceRefresh = forceRefresh,
                     allowGfriends = allowGfriends,
+                    allowExternalActorSources = info.source !in setOf("dmm2", "dmm"),
                     reuseMergedActorIdentities = true
                 ))
                 updateActorAliasesInNfo(movie, resolvedInfo)
@@ -912,12 +896,11 @@ class StrmScrapeRepository(
             writeTextFile(movieDirectory, nfoName, NfoWriter.build(writeInfo))
             logStore.append("NFO written: $nfoName")
 
-            val imageReferer = info.imageReferer()
             val poster = info.posterUrl.ifBlank { info.thumbUrl }
             val posterName = "$baseName-poster.jpg"
             if (poster.isNotBlank()) {
                 logStore.append("Download poster: $poster")
-                tryDownloadImageToFile(movieDirectory, posterName, poster, imageReferer, "Poster")
+                tryDownloadImageToFile(movieDirectory, posterName, poster, info.imageRefererFor(poster), "Poster")
             } else {
                 logStore.append("Poster URL is blank; skipped")
             }
@@ -925,11 +908,11 @@ class StrmScrapeRepository(
             if (info.thumbUrl.isNotBlank()) {
                 val thumbName = "$baseName-thumb.jpg"
                 logStore.append("Download thumb: ${info.thumbUrl}")
-                val thumbWritten = tryDownloadImageToFile(movieDirectory, thumbName, info.thumbUrl, imageReferer, "Thumb")
+                val thumbWritten = tryDownloadImageToFile(movieDirectory, thumbName, info.thumbUrl, info.imageRefererFor(info.thumbUrl), "Thumb")
 
                 val fanartName = "$baseName-fanart.jpg"
                 logStore.append("Copy thumb as fanart: $fanartName")
-                tryDownloadImageToFile(movieDirectory, fanartName, info.thumbUrl, imageReferer, "Fanart")
+                tryDownloadImageToFile(movieDirectory, fanartName, info.thumbUrl, info.imageRefererFor(info.thumbUrl), "Fanart")
                 if (thumbWritten && shouldBuildPortraitPosterFromWideCover(poster, info.thumbUrl)) {
                     writePortraitPosterFromWideCover(movieDirectory, posterName, thumbName)
                 }
@@ -973,11 +956,10 @@ class StrmScrapeRepository(
         val posterName = "$baseName-poster.jpg"
         val thumbName = "$baseName-thumb.jpg"
         val fanartName = "$baseName-fanart.jpg"
-        val imageReferer = info.imageReferer()
         val poster = info.posterUrl.ifBlank { info.thumbUrl }
         if (poster.isNotBlank()) {
             logStore.append("Refresh poster: $poster")
-            tryDownloadImageToFile(directory, posterName, poster, imageReferer, "Poster")
+            tryDownloadImageToFile(directory, posterName, poster, info.imageRefererFor(poster), "Poster")
         } else if (replacesJavdbMetadata || info.source == JAVDB_ACTOR_EVIDENCE_SOURCE) {
             deleteScrapeImage(directory, posterName, "JavDB poster")
         } else {
@@ -985,8 +967,8 @@ class StrmScrapeRepository(
         }
         if (info.thumbUrl.isNotBlank()) {
             logStore.append("Refresh thumb: ${info.thumbUrl}")
-            val thumbWritten = tryDownloadImageToFile(directory, thumbName, info.thumbUrl, imageReferer, "Thumb")
-            tryDownloadImageToFile(directory, fanartName, info.thumbUrl, imageReferer, "Fanart")
+            val thumbWritten = tryDownloadImageToFile(directory, thumbName, info.thumbUrl, info.imageRefererFor(info.thumbUrl), "Thumb")
+            tryDownloadImageToFile(directory, fanartName, info.thumbUrl, info.imageRefererFor(info.thumbUrl), "Fanart")
             if (thumbWritten && shouldBuildPortraitPosterFromWideCover(poster, info.thumbUrl)) {
                 writePortraitPosterFromWideCover(directory, posterName, thumbName)
             }
@@ -1009,8 +991,7 @@ class StrmScrapeRepository(
         allowGfriends: Boolean = settingsRepository.isGfriendsActorAvatarEnabled(),
         forceRefresh: Boolean = false,
         reuseMergedActorIdentities: Boolean = false,
-        allowExternalActorSources: Boolean = true,
-        preferKnownAliasesForDmm: Boolean = false
+        allowExternalActorSources: Boolean = true
     ): Map<String, List<String>> {
         /*
          * ================================================================================
@@ -1020,7 +1001,7 @@ class StrmScrapeRepository(
          * 数据源：当前影片演员列表、资料源头像、DMM2 GraphQL 和 gfriends Filetree.json。
          * 操作：
          * 1) 已存在本地头像的演员不重复下载。
-         * 2) 默认先查当前演员名；MSAJ 已确认别名时先查别名。
+         * 2) 默认先查当前演员名，再查当前资料明确给出的别名。
          * 3) 未命中时按 JavDB、JavBus 的候选头像依次下载。
          * 4) 最后查询 Fusion 的 gfriends 头像库。
          */
@@ -1031,7 +1012,6 @@ class StrmScrapeRepository(
         if (actorNames.isEmpty()) return emptyMap()
 
         logStore.append("开始补齐演员头像：${actorNames.size} 人")
-        val imageReferer = info.imageReferer()
         var downloaded = 0
         var changed = false
         var javdbActorsLoaded = false
@@ -1039,8 +1019,8 @@ class StrmScrapeRepository(
         var javlibraryActorsLoaded = false
         var javlibraryActors = emptyList<ActorAliasLookup>()
         val resolvedActorAliases = mutableMapOf<String, List<String>>()
-        val allowKnownAliasDmmLookup = preferKnownAliasesForDmm ||
-            (allowExternalActorSources && (allowJavdbAliases || allowJavlibraryAliases))
+        val allowKnownAliasDmmLookup = allowExternalActorSources &&
+            (allowJavdbAliases || allowJavlibraryAliases)
         if (reuseMergedActorIdentities) {
             logStore.append("Reuse merged actor identities for avatar aliases: ${info.number}")
         }
@@ -1217,7 +1197,7 @@ class StrmScrapeRepository(
             suspend fun tryDownload(
                 imageUrl: String,
                 sourceLabel: String,
-                referer: String? = imageReferer,
+                referer: String? = info.imageRefererFor(imageUrl),
                 aliasNames: Collection<String> = emptyList()
             ) {
                 runCatching {
@@ -1263,12 +1243,11 @@ class StrmScrapeRepository(
              * ================================================================================
              * 步骤8.2：按已确认身份顺序回查 DMM/FANZA 头像
              * ================================================================================
-             * 目标：MSAJ 用 JavLibrary 校准演员名后，优先使用其别名在官方库中的头像。
-             * 数据源：JavLibrary 已写入的 actorAliases 与 DMM/FANZA 演员姓名查询。
+             * 目标：优先使用当前演员名在官方库中的头像。
+             * 数据源：当前资料明确给出的 actorAliases 与 DMM/FANZA 演员姓名查询。
              * 操作：
-             * 1) MSAJ 已确认别名先回查，保留用户偏好的官方历史艺名头像。
-             * 2) 其它影片仍先查主名，再用外部资料确认的别名补齐。
-             * 3) 所有查询均未命中时，才继续资料源图片和 gfriends 兜底。
+             * 1) 先查主名，再用当前资料明确给出的别名补齐。
+             * 2) 所有查询均未命中时，才继续资料源图片和 gfriends 兜底。
              */
             val aliases = if (allowKnownAliasDmmLookup) {
                 val aliases = loadActorAliases()
@@ -1280,21 +1259,12 @@ class StrmScrapeRepository(
                 emptyList()
             }
 
-            if (preferKnownAliasesForDmm) {
-                aliases.forEach { alias ->
-                    if (!saved) {
-                        downloadDmmAvatar(alias, "DMM/FANZA 别名:$alias")
-                    }
-                }
-            }
             if (allowDmmName && !saved) {
                 downloadDmmAvatar(actorName, "DMM/FANZA:$actorName")
             }
-            if (!preferKnownAliasesForDmm) {
-                aliases.forEach { alias ->
-                    if (!saved) {
-                        downloadDmmAvatar(alias, "DMM/FANZA 别名:$alias")
-                    }
+            aliases.forEach { alias ->
+                if (!saved) {
+                    downloadDmmAvatar(alias, "DMM/FANZA 别名:$alias")
                 }
             }
 
@@ -1306,18 +1276,13 @@ class StrmScrapeRepository(
              * 数据源：多源融合后的 actorImageCandidates。
              * 操作：
              * 1) 候选已按 DMM/FANZA、JavDB、JavBus 顺序排列。
-             * 2) JavBus 演员图片使用同站影片页 Referer，避免混合资料源时被 CDN 拒绝。
+             * 2) 图片 Referer 由图片域名生成，避免混合资料源时被 CDN 拒绝。
              * 3) 仅当前两轮官方回查未命中时下载第一个可用候选。
              */
             if (!saved && allowSourceImages) {
                 actorImageCandidates(info, actorName).forEach { url ->
                     if (!saved) {
-                        val referer = if (url.startsWith("$JAVBUS_BASE_URL/pics/actress/", ignoreCase = true)) {
-                            "$JAVBUS_BASE_URL${info.number}"
-                        } else {
-                            imageReferer
-                        }
-                        tryDownload(url, "metadata", referer = referer)
+                        tryDownload(url, "metadata")
                     }
                 }
             }
@@ -1734,14 +1699,8 @@ class StrmScrapeRepository(
     private fun String.sameActorExactly(other: String): Boolean =
         actorNamesHaveExactVariant(this, other)
 
-    private fun ScrapedMovieInfo.imageReferer(): String? {
-        return website
-            .takeIf {
-                (source.equals("javbus", ignoreCase = true) && it.startsWith(JAVBUS_BASE_URL, ignoreCase = true)) ||
-                    (source.equals("javdb", ignoreCase = true) && it.startsWith(JAVDB_BASE_URL, ignoreCase = true)) ||
-                    (source.equals("javlibrary", ignoreCase = true) && it.startsWith(JAVLIBRARY_BASE_URL, ignoreCase = true))
-            }
-    }
+    private fun ScrapedMovieInfo.imageRefererFor(imageUrl: String): String? =
+        imageRefererFor(imageUrl, number, website)
 
     private fun DocumentFile.isExcludedAssetDirectory(): Boolean {
         val normalized = name.orEmpty().trim().lowercase().replace('_', ' ').replace('-', ' ')
@@ -1769,30 +1728,33 @@ class StrmScrapeRepository(
     private fun ScrapeSource.serialScrapeMutex(): Mutex? =
         if (this == ScrapeSource.Missav) missavScrapeMutex else null
 
-    private companion object {
+    companion object {
         const val GENERIC_FILE_MIME_TYPE = "application/octet-stream"
         const val JAVBUS_BASE_URL = "https://www.javbus.com/"
         const val JAVDB_BASE_URL = "https://javdb.com/"
         const val JAVLIBRARY_BASE_URL = "https://www.javlibrary.com/"
         const val PORTRAIT_POSTER_ASPECT_RATIO = 0.6666667f
         const val PORTRAIT_POSTER_JPEG_QUALITY = 96
-        /**
-         * ================================================================================
-         * 步骤1：定义全库演员资料源顺序
-         * ================================================================================
-         * 目标：全库头像任务统一融合所有非 MissAV 的影片资料源。
-         * 数据源：DMM/FANZA、JavDB、JavLibrary、JavBus、旧 DMM 和厂商官网。
-         * 操作：
-         * 1) DMM2 保持首源，由调用方单独传入。
-         * 2) 后续来源按别名质量、演员图片可用性和兼容性依次补齐。
-         */
-        val ACTOR_AVATAR_METADATA_FALLBACK_ORDER = listOf(
-            ScrapeSource.Javdb,
-            ScrapeSource.Javlibrary,
-            ScrapeSource.Javbus,
-            ScrapeSource.Dmm,
-            ScrapeSource.Official
-        )
+        internal fun imageRefererFor(imageUrl: String, number: String, sourcePageUrl: String): String? {
+            val imageHost = imageUrl.hostOrNull() ?: return null
+            return when {
+                imageHost == "javbus.com" || imageHost.endsWith(".javbus.com") ->
+                    "$JAVBUS_BASE_URL${number.trim()}"
+                imageHost == "javlibrary.com" || imageHost.endsWith(".javlibrary.com") ->
+                    sourcePageUrl.takeIf { it.hostOrNull()?.endsWith("javlibrary.com") == true } ?: JAVLIBRARY_BASE_URL
+                imageHost == "javdb.com" || imageHost.endsWith(".javdb.com") || imageHost.endsWith(".jdbstatic.com") ->
+                    sourcePageUrl.takeIf {
+                        val pageHost = it.hostOrNull()
+                        pageHost == "javdb.com" || pageHost?.endsWith(".javdb.com") == true
+                    } ?: JAVDB_BASE_URL
+                else -> sourcePageUrl.takeIf { it.hostOrNull() == imageHost }
+            }
+        }
+
+        private fun String.hostOrNull(): String? = runCatching {
+            URI(this).host?.lowercase(Locale.ROOT)
+        }.getOrNull()
+
         const val SCRAPE_QUEUE_POLL_INTERVAL_MS = 250L
         const val DMM_FANZA_AVATAR_TIMEOUT_MS = 8_000L
         const val WEBVIEW_ALIAS_TIMEOUT_MS = 75_000L
