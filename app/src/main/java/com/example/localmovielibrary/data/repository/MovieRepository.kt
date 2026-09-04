@@ -153,13 +153,35 @@ class MovieRepository(
         val text = query.trim()
         if (text.isBlank()) return@withContext emptyList()
         val pattern = "%${text.escapeLikePattern()}%"
-        when (scope.lowercase(Locale.ROOT)) {
+        val normalizedScope = scope.lowercase(Locale.ROOT)
+        val directMatches = when (normalizedScope) {
             "title" -> movieDao.searchMoviesByTitleLite(pattern)
             "actor" -> filterMetadataMovies(movieDao.getMoviesForActorLookupLite(pattern), text, exact = false) { it.actors }
             "tag" -> filterMetadataMovies(movieDao.getMoviesForTagLookupLite(pattern), text, exact = false) { it.tags }
             "genre" -> filterMetadataMovies(movieDao.getMoviesForGenreLookupLite(pattern), text, exact = false) { it.genres }
             else -> movieDao.searchMoviesLite(pattern)
         }
+        val numberQuery = movieNumberSearchQuery(text)
+            ?: return@withContext directMatches
+        if (normalizedScope !in setOf("all", "title")) return@withContext directMatches
+
+        /*
+         * ================================================================================
+         * 步骤1：补充番号分隔符搜索
+         * ================================================================================
+         * 目标：让 NAMH 022、NAMH-022 和 NAMH022 命中同一影片。
+         * 数据源：标题、原始标题和文件名中的标准化番号。
+         * 操作：
+         * 1) 用前缀和数字构造可跨连字符、空格和下划线的 SQL 候选查询。
+         * 2) 再按解析出的完整番号过滤，避免 NAMH-1022 等近似结果混入。
+         */
+        val numberMatches = when (normalizedScope) {
+            "title" -> movieDao.searchMoviesByTitleLite(numberQuery.candidateLikePattern)
+            else -> movieDao.searchMoviesLite(numberQuery.candidateLikePattern)
+        }.filter { movie -> movie.matchesMovieNumber(numberQuery.number) }
+        (numberMatches + directMatches)
+            .distinctBy { it.id }
+            .sortedBy { it.sortTitle.ifBlank { it.title }.lowercase(Locale.ROOT) }
     }
 
     suspend fun filterMovies(type: String, value: String): List<MovieEntity> = withContext(Dispatchers.IO) {
@@ -961,6 +983,32 @@ private fun String.movieNumberCandidateLikePattern(): String {
     }
     return "%${escapeLikePattern()}%"
 }
+
+internal data class MovieNumberSearchQuery(
+    val number: String,
+    val candidateLikePattern: String
+)
+
+/*
+ * ================================================================================
+ * 步骤1：标准化影片搜索中的番号
+ * ================================================================================
+ * 目标：把用户输入的不同番号分隔符转换为同一个候选搜索条件。
+ * 数据源：搜索框原始文本和 MovieNumberUtils 的番号解析结果。
+ * 操作：
+ * 1) 仅在输入包含完整番号时生成查询条件。
+ * 2) 使用前缀和数字之间的通配符匹配存量文件名的分隔符差异。
+ */
+internal fun movieNumberSearchQuery(text: String): MovieNumberSearchQuery? {
+    // 1.1 解析失败说明这不是番号搜索，保留普通全文匹配行为。
+    val number = extractMovieNumberInfo(text)?.number ?: return null
+    // 1.2 例如 NAMH 022 生成 %NAMH%022%，供 SQLite 候选筛选使用。
+    return MovieNumberSearchQuery(number = number, candidateLikePattern = number.movieNumberCandidateLikePattern())
+}
+
+private fun MovieEntity.matchesMovieNumber(number: String): Boolean =
+    listOf(videoName, title, originalTitle.orEmpty(), uniqueIds.joinToString(" "))
+        .any { source -> extractMovieNumberInfo(source)?.number == number }
 
 private fun summarizeValues(values: List<String>): List<MovieMetadataSummary> =
     values.map { it.trim().replace(Regex("""\s+"""), " ") }
