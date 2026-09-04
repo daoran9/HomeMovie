@@ -524,19 +524,32 @@ class MovieRepository(
             cloudStrmRecordDao.getByMovieId(movie.id)
         }
 
+        /*
+         * ================================================================================
+         * 步骤1：从实际 STRM 内容构造播放源
+         * ================================================================================
+         * 目标：显示 115 原始文件名，并排除旧索引中多个记录指向同一 pickcode 的重复源。
+         * 数据源：每条 CloudStrmRecord 对应的 STRM 文本地址。
+         * 操作：
+         * 1) 读取 STRM 中的真实 pickcode 和文件名。
+         * 2) 以真实 pickcode 去重，索引字段仅作为解析失败时的回退。
+         */
         val parts = records
             .asSequence()
             .filter { it.strmUri.isNotBlank() }
-            .filter { canOpenUri(it.strmUri) }
-            .distinctBy { it.playbackRecordKey() }
-            .map { record ->
+            .mapNotNull { record ->
+                val content = readStrmText(record.strmUri) ?: return@mapNotNull null
+                val source = parseStrmPlaybackSource(content)
+                val sourceFileName = source?.fileName ?: record.fileName
+                val sourceKey = (source?.pickcode ?: record.playbackRecordKey()).lowercase(Locale.ROOT)
                 MoviePlaybackPart(
-                    label = record.fileName.playbackPartUiLabel(),
+                    label = sourceFileName.playbackPartUiLabel(),
                     videoUri = record.strmUri,
-                    fileName = record.fileName
+                    fileName = sourceFileName,
+                    sourceKey = sourceKey
                 )
             }
-            .distinctBy { it.videoUri }
+            .distinctBy { it.sourceKey }
             .sortedWith(compareBy<MoviePlaybackPart> { it.label.playbackPartUiSortKey() }.thenBy { it.fileName.lowercase(Locale.ROOT) })
             .toList()
         val labelCounts = parts.groupingBy { it.label }.eachCount()
@@ -549,9 +562,16 @@ class MovieRepository(
         }
     }
 
+    private fun readStrmText(uriString: String): String? =
+        runCatching {
+            contentResolver.openInputStream(Uri.parse(uriString))
+                ?.bufferedReader(Charsets.UTF_8)
+                ?.use { it.readText() }
+        }.getOrNull()
+
     private fun canOpenUri(uriString: String): Boolean =
         runCatching {
-            context.contentResolver.openInputStream(Uri.parse(uriString))?.use { true } == true
+            contentResolver.openInputStream(Uri.parse(uriString))?.use { true } == true
         }.getOrDefault(false)
 
     private fun findFileWithParent(directory: DocumentFile, videoUri: String): FileWithParent? {
@@ -839,8 +859,40 @@ data class MovieMetadataSummary(
 data class MoviePlaybackPart(
     val label: String,
     val videoUri: String,
+    val fileName: String,
+    val sourceKey: String = videoUri
+)
+
+internal data class StrmPlaybackSource(
+    val pickcode: String,
     val fileName: String
 )
+
+/*
+ * ================================================================================
+ * 步骤1：解析 STRM 的 115 播放地址
+ * ================================================================================
+ * 目标：从下载地址恢复可读的网盘原始文件名和实际 pickcode。
+ * 数据源：STRM 首个非空文本行，格式为 /download_m3u/{pickcode}/{fileName}。
+ * 操作：
+ * 1) 定位受支持的播放路由和后续两个路径段。
+ * 2) 保留路径中的加号，并解码百分号编码后的文件名。
+ */
+internal fun parseStrmPlaybackSource(content: String): StrmPlaybackSource? {
+    // 1.1 STRM 的有效地址始终位于首个非空行，避免把尾部注释当作 URL。
+    val address = content.lineSequence().map(String::trim).firstOrNull { it.isNotBlank() } ?: return null
+    // 1.2 路由后的第一段是 pickcode，第二段是 Uri.encode 写入的原始文件名。
+    val match = STRM_PLAYBACK_SOURCE_PATTERN.find(address) ?: return null
+    val pickcode = match.groupValues[1].trim().takeIf { it.isNotBlank() } ?: return null
+    val fileName = decodeStrmPathSegment(match.groupValues[2]).trim().takeIf { it.isNotBlank() } ?: return null
+    return StrmPlaybackSource(pickcode = pickcode, fileName = fileName)
+}
+
+private val STRM_PLAYBACK_SOURCE_PATTERN =
+    Regex("""(?i)(?:^|/)(?:download_m3u|play|video_proxy)/([^/?#]+)/([^?#\r\n]+)""")
+
+private fun decodeStrmPathSegment(value: String): String =
+    java.net.URLDecoder.decode(value.replace("+", "%2B"), Charsets.UTF_8.name())
 
 data class DeleteMovieResult(
     val movieId: Long,

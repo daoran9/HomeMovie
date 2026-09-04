@@ -1,5 +1,6 @@
 package com.example.localmovielibrary.data.repository
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -40,5 +41,27 @@ class PosterArtworkRuleTest {
                 "https://cdn.example/thumb.jpg"
             )
         )
+    }
+
+    /*
+     * ================================================================================
+     * 步骤2：验证 STRM 播放源名称解析
+     * ================================================================================
+     * 目标：多播放源菜单必须展示 115 原始文件名，并以实际 pickcode 识别同一视频。
+     * 数据源：Cloud115StrmRepository 写入的 download_m3u 地址。
+     * 操作：
+     * 1) 提取真实 pickcode。
+     * 2) 解码原始文件名，同时保留文件名中的加号。
+     */
+    @Test
+    fun parsesOriginalPlaybackFileNameFromStrmAddress() {
+        // 2.1 使用实际 STRM 写入格式，文件名包含百分号编码和字面加号。
+        val source = parseStrmPlaybackSource(
+            "http://127.0.0.1/download_m3u/bd5h3bkwkk35g83ez/NAMH-056_restored%20iris+2.mp4"
+        )
+
+        // 2.2 pickcode 用于去重，文件名直接供详情页菜单显示。
+        assertEquals("bd5h3bkwkk35g83ez", source?.pickcode)
+        assertEquals("NAMH-056_restored iris+2.mp4", source?.fileName)
     }
 }

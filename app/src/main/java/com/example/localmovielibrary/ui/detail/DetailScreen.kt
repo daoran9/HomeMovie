@@ -534,7 +534,7 @@ private fun MobileMainButtons(
             ) {
                 Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(22.dp))
                 Spacer(Modifier.width(8.dp))
-                Text(if (playbackParts.size > 1) "播放 ${defaultPart?.label ?: "A"}" else "播放", fontWeight = FontWeight.Bold)
+                Text(if (playbackParts.size > 1) "选择播放源" else "播放", fontWeight = FontWeight.Bold)
             }
             DropdownMenu(
                 expanded = partMenuExpanded,
@@ -543,7 +543,22 @@ private fun MobileMainButtons(
             ) {
                 playbackParts.forEach { part ->
                     DropdownMenuItem(
-                        text = { Text("播放 ${part.label}", color = Color.White) },
+                        text = {
+                            Column(modifier = Modifier.widthIn(min = 232.dp, max = 296.dp)) {
+                                Text(
+                                    text = "播放 ${part.label}",
+                                    color = Color.White,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = part.fileName,
+                                    color = DetailMuted,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        },
                         onClick = {
                             partMenuExpanded = false
                             onPlay(part)
