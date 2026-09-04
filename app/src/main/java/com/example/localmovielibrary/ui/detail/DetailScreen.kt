@@ -86,9 +86,9 @@ import com.example.localmovielibrary.data.local.MovieEntity
 import com.example.localmovielibrary.data.repository.MoviePlaybackPart
 import com.example.localmovielibrary.scraper.ActorAvatarStore
 import com.example.localmovielibrary.scraper.MissavScraper
+import com.example.localmovielibrary.scraper.actorNameParts
 import com.example.localmovielibrary.scraper.actorNameVariants
 import com.example.localmovielibrary.scraper.isNonActorCategoryName
-import com.example.localmovielibrary.scraper.primaryActorName
 import com.example.localmovielibrary.ui.shared.UriImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -841,10 +841,33 @@ private fun ReleaseAndOverview(movie: MovieEntity, onTagClick: (String) -> Unit)
 
 @Composable
 fun CastSection(actors: List<String>, refreshVersion: Int, onActorClick: (String) -> Unit) {
-    val displayActors = actors
-        .map { it.primaryActorName() }
-        .filter { it.isNotBlank() && !isNonActorCategoryName(it) }
-        .distinctBy { actor -> actorNameVariants(actor).sorted().joinToString("|") }
+    /*
+     * ================================================================================
+     * 步骤1：整理演员卡片显示数据
+     * ================================================================================
+     * 目标：显示主名和当前影片已确认的全部别名，同时保持同一演员只有一个卡片。
+     * 数据源：Room 读取的 NFO 演员显示名，格式为“主名（别名）”。
+     * 操作：
+     * 1) 过滤演员分类标签，保留姓名片段。
+     * 2) 按所有姓名变体合并重复身份，并累积别名。
+     */
+    val displayActors = mutableListOf<List<String>>()
+    actors.forEach { rawActor ->
+        val names = actorNameParts(rawActor).filterNot(::isNonActorCategoryName)
+        if (names.isEmpty()) return@forEach
+
+        val identityKeys = names.flatMap(::actorNameVariants).toSet()
+        val existingIndex = displayActors.indexOfFirst { current ->
+            current.flatMap(::actorNameVariants).any { key -> key in identityKeys }
+        }
+        if (existingIndex < 0) {
+            displayActors += names
+        } else {
+            val merged = (displayActors[existingIndex] + names)
+                .distinctBy { name -> actorNameVariants(name).sorted().joinToString("|") }
+            displayActors[existingIndex] = merged
+        }
+    }
     if (displayActors.isEmpty()) return
     val context = LocalContext.current
     val avatarStore = remember(context, refreshVersion) { ActorAvatarStore(context) }
@@ -856,12 +879,13 @@ fun CastSection(actors: List<String>, refreshVersion: Int, onActorClick: (String
                 .horizontalScroll(rememberScrollState()),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            displayActors.take(24).forEach { actor ->
+            displayActors.take(24).forEach { actorNames ->
+                val primaryName = actorNames.first()
                 CastCard(
-                    name = actor,
-                    avatarUri = avatarStore.avatarUri(actor),
+                    names = actorNames,
+                    avatarUri = avatarStore.avatarUri(primaryName),
                     refreshVersion = refreshVersion,
-                    onClick = { onActorClick(actor) }
+                    onClick = { onActorClick(primaryName) }
                 )
             }
         }
@@ -869,10 +893,12 @@ fun CastSection(actors: List<String>, refreshVersion: Int, onActorClick: (String
 }
 
 @Composable
-private fun CastCard(name: String, avatarUri: String?, refreshVersion: Int, onClick: () -> Unit) {
+private fun CastCard(names: List<String>, avatarUri: String?, refreshVersion: Int, onClick: () -> Unit) {
+    val primaryName = names.first()
+    val aliases = names.drop(1)
     Column(
         modifier = Modifier
-            .width(82.dp)
+            .width(96.dp)
             .clickable(onClick = onClick),
         verticalArrangement = Arrangement.spacedBy(6.dp)
     ) {
@@ -897,12 +923,19 @@ private fun CastCard(name: String, avatarUri: String?, refreshVersion: Int, onCl
             }
         }
         Text(
-            text = name,
+            text = primaryName,
             color = Color.White.copy(alpha = 0.88f),
             style = MaterialTheme.typography.labelSmall,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis
         )
+        if (aliases.isNotEmpty()) {
+            Text(
+                text = aliases.joinToString("、"),
+                color = DetailMuted,
+                style = MaterialTheme.typography.labelSmall
+            )
+        }
         Text(
             text = "演员",
             color = DetailMuted,
