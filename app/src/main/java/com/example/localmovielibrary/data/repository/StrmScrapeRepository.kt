@@ -13,6 +13,7 @@ import com.example.localmovielibrary.scraper.JavdbScraper
 import com.example.localmovielibrary.scraper.JavlibraryScraper
 import com.example.localmovielibrary.scraper.JavlibraryWebViewFetcher
 import com.example.localmovielibrary.scraper.JavbusScraper
+import com.example.localmovielibrary.scraper.JAVDB_ACTOR_EVIDENCE_SOURCE
 import com.example.localmovielibrary.scraper.MissavScraper
 import com.example.localmovielibrary.scraper.MovieNumberExtractor
 import com.example.localmovielibrary.scraper.MovieScraperRegistry
@@ -923,6 +924,9 @@ class StrmScrapeRepository(
         val baseName = target.baseName
         val directory = target.directory
         val nfoName = "$baseName.nfo"
+        val replacesJavdbMetadata = directory.findFile(nfoName)
+            ?.let(::isJavdbMetadataNfo)
+            ?: false
         val displayNumber = displayNumberWithVariant(info.number, target.file.name.orEmpty())
         val writeInfo = info.copy(number = displayNumber)
         logStore.append("Rewrite NFO: $nfoName")
@@ -937,7 +941,8 @@ class StrmScrapeRepository(
          * 数据源：本次融合后的 posterUrl、thumbUrl 和当前影片目录。
          * 操作：
          * 1) 仅在新图片地址存在时覆盖同名图片，避免空字段删除原图。
-         * 2) 下载成功后再删除旧文件并写入，保留网络失败时的原图片。
+         * 2) 替换旧 JavDB 资料时，未被安全来源覆盖的图片必须删除，避免水印残留。
+         * 3) 其它网络失败仍保留原图片。
          */
         logStore.append("开始刷新重新刮削图片：$baseName")
         val posterName = "$baseName-poster.jpg"
@@ -948,6 +953,8 @@ class StrmScrapeRepository(
         if (poster.isNotBlank()) {
             logStore.append("Refresh poster: $poster")
             tryDownloadImageToFile(directory, posterName, poster, imageReferer, "Poster")
+        } else if (replacesJavdbMetadata || info.source == JAVDB_ACTOR_EVIDENCE_SOURCE) {
+            deleteScrapeImage(directory, posterName, "JavDB poster")
         } else {
             logStore.append("Poster URL is blank; keeping existing poster")
         }
@@ -955,6 +962,9 @@ class StrmScrapeRepository(
             logStore.append("Refresh thumb: ${info.thumbUrl}")
             tryDownloadImageToFile(directory, thumbName, info.thumbUrl, imageReferer, "Thumb")
             tryDownloadImageToFile(directory, fanartName, info.thumbUrl, imageReferer, "Fanart")
+        } else if (replacesJavdbMetadata || info.source == JAVDB_ACTOR_EVIDENCE_SOURCE) {
+            deleteScrapeImage(directory, thumbName, "JavDB thumb")
+            deleteScrapeImage(directory, fanartName, "JavDB fanart")
         } else {
             logStore.append("Thumb URL is blank; keeping existing thumb and fanart")
         }
@@ -1583,6 +1593,18 @@ class StrmScrapeRepository(
         }.onFailure { error ->
             logStore.append("$label download failed; skipped image: ${error.message ?: error::class.java.simpleName}")
         }.isSuccess
+    }
+
+    private fun isJavdbMetadataNfo(file: DocumentFile): Boolean =
+        context.contentResolver.openInputStream(file.uri)
+            ?.bufferedReader()
+            ?.use { reader -> reader.readText().contains("<source>javdb</source>") }
+            ?: false
+
+    private fun deleteScrapeImage(directory: DocumentFile, fileName: String, label: String) {
+        if (directory.findFile(fileName)?.delete() == true) {
+            logStore.append("$label removed: $fileName")
+        }
     }
 
     private fun deleteMetadataFiles(directory: DocumentFile, baseName: String) {

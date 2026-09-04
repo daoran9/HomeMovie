@@ -78,6 +78,8 @@ class MovieScraperRegistryTest {
                         rating = "7.8",
                         actors = listOf("演员甲"),
                         genres = listOf("剧情"),
+                        thumbUrl = "https://javlibrary.example/thumb.jpg",
+                        posterUrl = "https://javlibrary.example/poster.jpg",
                         source = "javlibrary"
                     )
                 ),
@@ -90,6 +92,8 @@ class MovieScraperRegistryTest {
                         plot = "JB 简介",
                         actors = listOf("演员甲"),
                         genres = listOf("办公室"),
+                        thumbUrl = "https://javbus.example/thumb.jpg",
+                        posterUrl = "https://javbus.example/poster.jpg",
                         source = "javbus"
                     )
                 ),
@@ -102,6 +106,8 @@ class MovieScraperRegistryTest {
                         plot = "JavDB 简介",
                         actors = listOf("演员甲"),
                         genres = listOf("熟女"),
+                        thumbUrl = "https://javdb.example/thumb.jpg",
+                        posterUrl = "https://javdb.example/poster.jpg",
                         source = "javdb"
                     )
                 ),
@@ -122,8 +128,42 @@ class MovieScraperRegistryTest {
         assertEquals("JL 标题", info.title)
         assertEquals("JB 简介", info.plot)
         assertEquals("7.8", info.rating)
-        assertEquals(listOf("剧情", "办公室", "熟女"), info.genres)
+        assertEquals(listOf("剧情", "办公室"), info.genres)
+        assertEquals("https://javlibrary.example/thumb.jpg", info.thumbUrl)
+        assertEquals("https://javlibrary.example/poster.jpg", info.posterUrl)
         assertEquals(listOf("演员甲"), info.actors)
+    }
+
+    @Test
+    fun scrapeWithDmmPriorityUsesJavdbOnlyForActorEvidenceWhenNoSafeMetadataExists() = runBlocking {
+        val registry = MovieScraperRegistry(
+            listOf(
+                FailingMovieScraper(ScrapeSource.Dmm2),
+                InfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "JavDB 标题",
+                        plot = "JavDB 简介",
+                        thumbUrl = "https://javdb.example/thumb.jpg",
+                        posterUrl = "https://javdb.example/poster.jpg",
+                        actors = listOf("演员甲"),
+                        actorImageUrls = mapOf("演员甲" to "https://c0.jdbstatic.com/avatars/ab/Ab123.jpg"),
+                        source = "javdb"
+                    )
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("ABC-123")
+
+        assertEquals("", info.title)
+        assertEquals("", info.plot)
+        assertEquals("", info.thumbUrl)
+        assertEquals("", info.posterUrl)
+        assertEquals(JAVDB_ACTOR_EVIDENCE_SOURCE, info.source)
+        assertEquals(listOf("演员甲"), info.actors)
+        assertEquals("https://c0.jdbstatic.com/avatars/ab/Ab123.jpg", info.actorImageUrls["演员甲"])
     }
 
     @Test

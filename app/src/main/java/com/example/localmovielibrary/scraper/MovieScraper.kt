@@ -131,28 +131,30 @@ class MovieScraperRegistry(
          * 数据源：JavLibrary、JavBus、JavDB。
          * 操作：
          * 1) 三个来源全部尝试，JL 作为结构化资料和演员主名基准。
-         * 2) JB 优先提供简介，JavDB 提供性别排除和其它演员证据。
-         * 3) 三源类型和标签合并去重；评分只接受 JL 的有效值。
+         * 2) JB 优先提供简介；JavDB 只提供性别排除、别名和演员头像候选。
+         * 3) 标题、详情、类型和影片图片只接受 JL、JB，避免 JavDB 水印素材进入影片库。
          */
         listOf(ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb)
             .forEach { source -> collect(source) }
 
-        val fallbackResults = collected
-            .filter { it.source in EXTERNAL_FALLBACK_SOURCES }
+        val safeMetadataResults = collected
+            .filter { it.source in SAFE_METADATA_FALLBACK_SOURCES }
             .map { it.info }
-        if (fallbackResults.isNotEmpty()) {
+        val javdbActorEvidence = collected
+            .filter { it.source == ScrapeSource.Javdb }
+            .map { it.info }
+        if (safeMetadataResults.isNotEmpty()) {
             fun firstNonBlank(infos: List<ScrapedMovieInfo>, selector: (ScrapedMovieInfo) -> String): String =
                 infos.asSequence().map(selector).firstOrNull { it.isNotBlank() }.orEmpty()
 
             fun mergedValues(selector: (ScrapedMovieInfo) -> List<String>): List<String> =
-                fallbackResults
-                    .flatMap(selector)
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() && !isNonActorCategoryName(it) }
-                    .distinct()
+                safeMetadataResults
+                .flatMap(selector)
+                .map { it.trim() }
+                .filter { it.isNotBlank() && !isNonActorCategoryName(it) }
+                .distinct()
 
-            val structuralResults = fallbackResults
-            val narrativeResults = listOf(ScrapeSource.Javbus, ScrapeSource.Javdb, ScrapeSource.Javlibrary)
+            val narrativeResults = listOf(ScrapeSource.Javbus, ScrapeSource.Javlibrary)
                 .mapNotNull { source ->
                     collected.firstOrNull { it.source == source }?.info
                 }
@@ -161,21 +163,40 @@ class MovieScraperRegistry(
                 ?.info
                 ?.rating
                 .orEmpty()
-            val merged = mergeInfos(structuralResults)
-            val result = merged.copy(
+            val safeMetadata = mergeInfos(safeMetadataResults)
+            val actorEvidence = mergeInfos(safeMetadataResults + javdbActorEvidence)
+            val result = safeMetadata.copy(
                 plot = firstNonBlank(narrativeResults) { it.plot },
                 outline = firstNonBlank(narrativeResults) { it.outline },
+                actors = actorEvidence.actors,
+                actorAliases = actorEvidence.actorAliases,
+                excludedActorNames = actorEvidence.excludedActorNames,
+                actorImageUrls = actorEvidence.actorImageUrls,
+                actorImageCandidates = actorEvidence.actorImageCandidates,
                 genres = mergedValues { it.genres },
                 tags = mergedValues { it.tags },
-                rating = javlibraryRating,
-                thumbUrl = firstNonBlank(structuralResults) { it.thumbUrl },
-                posterUrl = firstNonBlank(structuralResults) { it.posterUrl }
+                rating = javlibraryRating
             ).canonicalizeActorIdentities()
             logger?.invoke(
                 "DMM/FANZA 未命中，完成外部后备融合：number=$number, " +
                     "sources=${collected.joinToString { it.source.name }}"
             )
             return result
+        }
+
+        if (javdbActorEvidence.isNotEmpty()) {
+            val actorEvidence = mergeInfos(javdbActorEvidence)
+            logger?.invoke("DMM/FANZA 未命中，JavDB 仅保留演员证据：number=$number")
+            return ScrapedMovieInfo(
+                number = number,
+                title = "",
+                actors = actorEvidence.actors,
+                actorAliases = actorEvidence.actorAliases,
+                excludedActorNames = actorEvidence.excludedActorNames,
+                actorImageUrls = actorEvidence.actorImageUrls,
+                actorImageCandidates = actorEvidence.actorImageCandidates,
+                source = JAVDB_ACTOR_EVIDENCE_SOURCE
+            ).canonicalizeActorIdentities()
         }
 
         val detail = lastError?.message ?: lastError?.javaClass?.simpleName ?: "未知错误"
@@ -667,10 +688,9 @@ class MovieScraperRegistry(
     }
 
     private companion object {
-        val EXTERNAL_FALLBACK_SOURCES = setOf(
+        val SAFE_METADATA_FALLBACK_SOURCES = setOf(
             ScrapeSource.Javlibrary,
-            ScrapeSource.Javbus,
-            ScrapeSource.Javdb
+            ScrapeSource.Javbus
         )
         val DEFAULT_FALLBACK_ORDER = listOf(
             ScrapeSource.Dmm2,

@@ -10,6 +10,9 @@ enum class ScrapeSource {
     Missav
 }
 
+/** JavDB 仅提供演员身份证据，不能作为影片资料或图片的来源。 */
+internal const val JAVDB_ACTOR_EVIDENCE_SOURCE = "javdb-actors-only"
+
 data class ScrapedMovieInfo(
     val number: String,
     val title: String,
