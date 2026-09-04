@@ -96,9 +96,24 @@ class MovieScraperRegistry(
             val dmmInfo = collect(ScrapeSource.Dmm)
             val merged = mergeInfos(listOf(dmm2Info)).let { official ->
                 official.copy(
+                    title = official.title.ifBlank { dmmInfo?.title.orEmpty() },
+                    originalTitle = official.originalTitle.ifBlank { dmmInfo?.originalTitle.orEmpty() },
+                    plot = official.plot.ifBlank { dmmInfo?.plot.orEmpty() },
+                    outline = official.outline.ifBlank { dmmInfo?.outline.orEmpty() },
+                    premiered = official.premiered.ifBlank { dmmInfo?.premiered.orEmpty() },
+                    year = official.year.ifBlank { dmmInfo?.year.orEmpty() },
                     runtime = official.runtime.ifBlank { dmmInfo?.runtime.orEmpty() },
+                    studio = official.studio.ifBlank { dmmInfo?.studio.orEmpty() },
+                    publisher = official.publisher.ifBlank { dmmInfo?.publisher.orEmpty() },
+                    series = official.series.ifBlank { dmmInfo?.series.orEmpty() },
                     directors = official.directors.ifEmpty { dmmInfo?.directors.orEmpty() },
-                    trailer = official.trailer.ifBlank { dmmInfo?.trailer.orEmpty() }
+                    genres = official.genres.ifEmpty { dmmInfo?.genres.orEmpty() },
+                    tags = official.tags.ifEmpty { dmmInfo?.tags.orEmpty() },
+                    rating = official.rating.ifBlank { dmmInfo?.rating.orEmpty() },
+                    trailer = official.trailer.ifBlank { dmmInfo?.trailer.orEmpty() },
+                    website = official.website.ifBlank { dmmInfo?.website.orEmpty() },
+                    thumbUrl = official.thumbUrl.ifBlank { dmmInfo?.thumbUrl.orEmpty() },
+                    posterUrl = official.posterUrl.ifBlank { dmmInfo?.posterUrl.orEmpty() }
                 )
             }
             logger?.invoke(

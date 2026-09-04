@@ -279,7 +279,7 @@ class StrmScrapeRepository(
         source: ScrapeSource,
         forceDistinct: Boolean = false,
         outputRootUri: String? = null,
-        automaticPriority: Boolean = true
+        automaticPriority: Boolean = source != ScrapeSource.Missav
     ): ScrapedMovieWriteResult = runQueuedScrapeTask(
         label = "scrape-uri:${Uri.parse(strmUri).lastPathSegment.orEmpty()}:${source.label}",
         serialMutex = source.serialScrapeMutex()
@@ -519,11 +519,21 @@ class StrmScrapeRepository(
             runCatching {
                 logStore.append("Scraping $number, file=${target.file.name}")
                 appendMovieDivider("Start batch movie scrape", number, target.file.name.orEmpty(), source)
-                logStore.append("Use DMM/FANZA priority scrape chain for batch: $number")
-                val scrapedInfo = scraperRegistry.scrapeWithDmmPriority(
-                    number = number,
-                    excludedSources = excludedSources
+                logStore.append(
+                    if (source == ScrapeSource.Missav) {
+                        "Use single-source scrape for batch: ${source.label}, number=$number"
+                    } else {
+                        "Use DMM/FANZA priority scrape chain for batch: $number"
+                    }
                 )
+                val scrapedInfo = if (source == ScrapeSource.Missav) {
+                    scraperRegistry.scrape(source, number)
+                } else {
+                    scraperRegistry.scrapeWithDmmPriority(
+                        number = number,
+                        excludedSources = excludedSources
+                    )
+                }
                 val info = scrapedInfo.withResolvedActorAliases(
                     downloadActorAvatars(
                         scrapedInfo,
