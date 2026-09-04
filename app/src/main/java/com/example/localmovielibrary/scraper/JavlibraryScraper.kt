@@ -139,6 +139,7 @@ class JavlibraryScraper(
         if (title.isBlank()) error("JavLibrary 没有解析到标题：$number")
 
         val cover = sectionImage(html, "video_jacket")
+        val poster = buildPosterUrl(cover)
         val release = sectionValue(html, "video_date")
         val directors = sectionLinks(html, "video_director")
         val cast = parseActors(html)
@@ -168,7 +169,15 @@ class JavlibraryScraper(
             website = url,
             source = "javlibrary",
             thumbUrl = cover,
-            posterUrl = cover
+            posterUrl = poster
+        )
+    }
+
+    private fun buildPosterUrl(coverUrl: String): String {
+        if (!coverUrl.contains("dmm.co.jp/", ignoreCase = true)) return coverUrl
+        return coverUrl.replace(
+            Regex("""pl(\.(jpg|jpeg|png|webp))$""", RegexOption.IGNORE_CASE),
+            "ps\$1"
         )
     }
 

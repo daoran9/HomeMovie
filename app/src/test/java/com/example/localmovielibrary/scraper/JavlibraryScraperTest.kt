@@ -87,6 +87,22 @@ class JavlibraryScraperTest {
     }
 
     @Test
+    fun parseDetailUsesDmmPortraitImageForPoster() {
+        val html = """
+            <html><body>
+              <div id="video_title"><h3>示例影片</h3></div>
+              <div id="video_id"><span class="text">识别码: ABC-123</span></div>
+              <div id="video_jacket"><img src="https://pics.dmm.co.jp/mono/movie/adult/abc123/abc123pl.jpg"></div>
+            </body></html>
+        """.trimIndent()
+
+        val info = scraper.parseDetail("ABC-123", "https://www.javlibrary.com/cn/?v=javli123", html)
+
+        assertEquals("https://pics.dmm.co.jp/mono/movie/adult/abc123/abc123pl.jpg", info.thumbUrl)
+        assertEquals("https://pics.dmm.co.jp/mono/movie/adult/abc123/abc123ps.jpg", info.posterUrl)
+    }
+
+    @Test
     fun parseDetailReadsActorAliasFromJavlibraryCast() {
         val html = """
             <html><head><title>MSAJ-004 - JAVLibrary</title></head>
