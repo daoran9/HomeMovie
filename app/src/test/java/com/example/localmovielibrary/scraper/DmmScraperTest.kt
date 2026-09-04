@@ -1,6 +1,7 @@
 package com.example.localmovielibrary.scraper
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Test
 
 class DmmScraperTest {
@@ -17,5 +18,14 @@ class DmmScraperTest {
             "https://www.dmm.co.jp/digital/videoa/-/detail/=/cid=1namh00022/",
             scraper.selectDetailUrl(html, "NAMH-022")
         )
+    }
+
+    @Test
+    fun selectDetailUrlRejectsOnlyLongerCatalogPrefix() {
+        val html = """
+            <a href="/digital/videoa/-/detail/=/cid=1hnamh00022/">HNAMH-022</a>
+        """.trimIndent()
+
+        assertNull(scraper.selectDetailUrl(html, "NAMH-022"))
     }
 }

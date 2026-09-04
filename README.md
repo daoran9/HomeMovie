@@ -21,7 +21,7 @@ HomeMovie/
 首先需要扫描二维码登录，选择你想要的登录方式并获取二维码，然后使用 115 App 扫码登录。其他设置不用管。
 
 ### 3. 刮削
-默认刮削源按首选源工作；首选源无结果时会自动尝试其它来源，自动链路不包含 MissAV。
+默认、批量和重新刮削使用 DMM/FANZA 优先链；严格未命中后完整收集 JavLibrary、JavBus、JavDB，自动链路不包含 MissAV。详情页单独选择来源时仍按单源刮削。
 注意：`DMM` 和 `DMM2` 刮削必须挂日本节点，否则无法刮削。
 
 ### 4. 字幕
@@ -42,7 +42,7 @@ HomeMovie/
 - 统一优化首页、影片库、网盘、搜索、收藏、设置、日志、筛选结果等页面顶部栏的状态栏间距和字号，减少与手机 WiFi、电量图标挤在一起的问题。
 - 设置 -> 网盘设置新增“开启国产页面”开关，默认关闭；关闭后影片库不显示“国产”分类。
 - 刮削设置新增 DMM2 跳过番号开头列表，默认包含 `ABF`、`ABW`、`ABP`、`REBDB`、`TRE`、`PPT`、`CHN`、`BGN`；命中后只排除 DMM2，继续尝试其它来源。
-- 网盘批量入库新增多源回退：首选源失败后按 DMM2、JavDB、JavLibrary、JavBus、DMM、Official 顺序尝试，MissAV 不参与自动回退。
+- 网盘批量入库使用 DMM/FANZA 优先链：官方严格命中后只允许旧 DMM 补缺，未命中时完整收集 JavLibrary、JavBus、JavDB，MissAV 不参与自动链。
 - 新增 JavLibrary 刮削方式；该站有 Cloudflare 时，先在设置页用 WebView 完成验证并保存 Cookie，再执行刮削。
 - 演员头像补齐优先使用 DMM/FANZA 官方头像，再用 JavDB、JavLibrary 演员名回查官方头像，最后回退当前资料源和 Fusion 使用的 gfriends 头像库；支持括号别名、短名匹配，DMM 占位图不会写入缓存。
 
@@ -69,7 +69,7 @@ HomeMovie/
 - Media3 播放器：支持本地视频、STRM、115 网盘直链播放，并保留播放进度。
 - STRM 解析链路：支持从 STRM 提取 pickcode，缓存 115 真实视频直链，过期后自动重新获取。
 - 115 网盘浏览：支持二维码登录、文件夹浏览、按时间或大小排序、视频添加入库、直链缓存和网盘播放。
-- 刮削能力：支持 DMM、DMM2、Official、JavDB、JavLibrary、JavBus、MissAV 等来源，默认刮削方式为 DMM2，并支持首选源失败后的多源回退。
+- 刮削能力：支持 DMM、DMM2、Official、JavDB、JavLibrary、JavBus、MissAV 等来源，默认刮削使用 DMM/FANZA 优先链，详情页可单独选择来源。
 - 多版本和分段视频：支持普通版、4K/8K 版本以及分段视频在详情页中作为不同播放源选择。
 - 国产 A 目录：支持单独的国产视频数据入口和展示页面。
 - VR 播放辅助：支持普通 2D 与多种 VR 模式切换，包括 360、180、SBS、OU 等。

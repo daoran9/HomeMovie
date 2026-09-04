@@ -33,7 +33,7 @@ object NfoWriter {
             appendLine("  <actor>")
             tag("name", canonicalInfo.actorDisplayName(actor), indent = "    ")
             canonicalInfo.actorImageUrls[actor]
-                ?.takeIf(::isOfficialDmmActorImageUrl)
+                ?.takeIf(::isActorIdentityImageUrl)
                 ?.let { tag("thumb", it, indent = "    ") }
             tag("type", "Actor", indent = "    ")
             appendLine("  </actor>")
@@ -183,7 +183,7 @@ object NfoWriter {
         append("    <name>")
         append(actorDisplayName(actor).escapeXml())
         appendLine("</name>")
-        actorImageUrls[actor]?.takeIf(::isOfficialDmmActorImageUrl)?.let { imageUrl ->
+        actorImageUrls[actor]?.takeIf(::isActorIdentityImageUrl)?.let { imageUrl ->
             append("    <thumb>")
             append(imageUrl.escapeXml())
             appendLine("</thumb>")
@@ -251,11 +251,11 @@ object NfoWriter {
             .distinct()
 
     private fun String.withActorThumb(candidateUrl: String?): String {
-        val officialUrl = candidateUrl?.takeIf(::isOfficialDmmActorImageUrl)
+        val identityImageUrl = candidateUrl?.takeIf(::isActorIdentityImageUrl)
         val withoutThumbs = ACTOR_THUMB.replace(this, "")
-        if (officialUrl == null) return sanitizeActorThumbs()
+        if (identityImageUrl == null) return sanitizeActorThumbs()
         val nameMatch = ACTOR_NAME.find(withoutThumbs) ?: return withoutThumbs
-        val thumb = "\n    <thumb>${officialUrl.escapeXml()}</thumb>"
+        val thumb = "\n    <thumb>${identityImageUrl.escapeXml()}</thumb>"
         return withoutThumbs.replaceRange(nameMatch.range.last + 1, nameMatch.range.last + 1, thumb)
     }
 

@@ -253,15 +253,24 @@ class StrmScrapeRepository(
         reachable
     }
 
-    suspend fun scrapeMovie(movie: MovieEntity, source: ScrapeSource, forceDistinct: Boolean = false): ScrapedMovieInfo =
-        scrapeMovieWithOutput(movie, source, forceDistinct).info
+    suspend fun scrapeMovie(
+        movie: MovieEntity,
+        source: ScrapeSource,
+        forceDistinct: Boolean = false,
+        automaticPriority: Boolean = false
+    ): ScrapedMovieInfo = scrapeMovieWithOutput(movie, source, forceDistinct, automaticPriority).info
 
-    suspend fun scrapeMovieWithOutput(movie: MovieEntity, source: ScrapeSource, forceDistinct: Boolean = false): ScrapedMovieWriteResult = runQueuedScrapeTask(
+    suspend fun scrapeMovieWithOutput(
+        movie: MovieEntity,
+        source: ScrapeSource,
+        forceDistinct: Boolean = false,
+        automaticPriority: Boolean = false
+    ): ScrapedMovieWriteResult = runQueuedScrapeTask(
         label = "scrape:${movie.videoName}:${source.label}",
         serialMutex = source.serialScrapeMutex()
     ) {
         val target = findTargetForMovie(movie)
-        scrapeTargetWithOutput(target, source, forceDistinct)
+        scrapeTargetWithOutput(target, source, forceDistinct, automaticPriority = automaticPriority)
     }
 
     suspend fun scrapeStrmUriWithOutput(
@@ -269,7 +278,8 @@ class StrmScrapeRepository(
         strmUri: String,
         source: ScrapeSource,
         forceDistinct: Boolean = false,
-        outputRootUri: String? = null
+        outputRootUri: String? = null,
+        automaticPriority: Boolean = true
     ): ScrapedMovieWriteResult = runQueuedScrapeTask(
         label = "scrape-uri:${Uri.parse(strmUri).lastPathSegment.orEmpty()}:${source.label}",
         serialMutex = source.serialScrapeMutex()
@@ -282,14 +292,15 @@ class StrmScrapeRepository(
         }
         val target = findTargetFast(sourceRoot, sourceRootUri, strmUri)
             ?: error("当前 STRM 文件不存在")
-        scrapeTargetWithOutput(target, source, forceDistinct, outputRoot)
+        scrapeTargetWithOutput(target, source, forceDistinct, outputRoot, automaticPriority)
     }
 
     private suspend fun scrapeTargetWithOutput(
         target: StrmTarget,
         source: ScrapeSource,
         forceDistinct: Boolean,
-        outputRoot: DocumentFile? = null
+        outputRoot: DocumentFile? = null,
+        automaticPriority: Boolean = false
     ): ScrapedMovieWriteResult {
         val number = MovieNumberExtractor.extract(target.file.name.orEmpty())
             ?: error("无法从文件名提取番号：${target.file.name}")
@@ -300,15 +311,27 @@ class StrmScrapeRepository(
         }
         logStore.append("Start scrape: file=${target.file.name}, number=$number, source=${source.label}")
         appendMovieDivider("Start movie scrape", number, target.file.name.orEmpty(), source)
-        logStore.append("Collect all metadata sources for scrape: $number")
-        val scrapedInfo = scraperRegistry.scrapeWithFallback(
-            preferred = source,
-            number = number,
-            excludedSources = excludedSources,
-            collectAllSources = true
+        logStore.append(
+            if (automaticPriority) {
+                "Use DMM/FANZA priority scrape chain: $number"
+            } else {
+                "Use single-source scrape: ${source.label}, number=$number"
+            }
         )
+        val scrapedInfo = if (automaticPriority) {
+            scraperRegistry.scrapeWithDmmPriority(
+                number = number,
+                excludedSources = excludedSources
+            )
+        } else {
+            scraperRegistry.scrape(source, number)
+        }
         val info = scrapedInfo.withResolvedActorAliases(
-            downloadActorAvatars(scrapedInfo, reuseMergedActorIdentities = true)
+            downloadActorAvatars(
+                scrapedInfo,
+                allowExternalActorSources = !automaticPriority || scrapedInfo.source !in setOf("dmm2", "dmm"),
+                reuseMergedActorIdentities = true
+            )
         )
         logStore.append("Metadata fetched: ${info.title.ifBlank { number }}")
         val strmUri = writeOrganizedScrapeFiles(target, info, number, forceDistinct, outputRoot)
@@ -387,7 +410,11 @@ class StrmScrapeRepository(
         ScrapedMovieWriteResult(info = info, strmUri = finalStrmUri)
     }
 
-    suspend fun rescrapeMovie(movie: MovieEntity, source: ScrapeSource): ScrapedMovieInfo = runQueuedScrapeTask(
+    suspend fun rescrapeMovie(
+        movie: MovieEntity,
+        source: ScrapeSource,
+        automaticPriority: Boolean = false
+    ): ScrapedMovieInfo = runQueuedScrapeTask(
         label = "rescrape:${movie.videoName}:${source.label}",
         serialMutex = source.serialScrapeMutex()
     ) {
@@ -402,14 +429,27 @@ class StrmScrapeRepository(
         }
         logStore.append("Start rescrape: file=${target.file.name}, number=$number, source=${source.label}")
         appendMovieDivider("Start movie rescrape", number, target.file.name.orEmpty(), source)
-        logStore.append("Collect all metadata sources for rescrape: $number")
-        val scrapedInfo = scraperRegistry.scrapeWithFallback(
-            preferred = source,
-            number = number,
-            excludedSources = excludedSources,
-            collectAllSources = true
+        logStore.append(
+            if (automaticPriority) {
+                "Use DMM/FANZA priority scrape chain for rescrape: $number"
+            } else {
+                "Use single-source scrape for rescrape: ${source.label}, number=$number"
+            }
         )
-        val info = scrapedInfo.withResolvedActorAliases(downloadActorAvatars(scrapedInfo))
+        val scrapedInfo = if (automaticPriority) {
+            scraperRegistry.scrapeWithDmmPriority(
+                number = number,
+                excludedSources = excludedSources
+            )
+        } else {
+            scraperRegistry.scrape(source, number)
+        }
+        val info = scrapedInfo.withResolvedActorAliases(
+            downloadActorAvatars(
+                scrapedInfo,
+                allowExternalActorSources = automaticPriority.not() || scrapedInfo.source !in setOf("dmm2", "dmm")
+            )
+        )
         logStore.append("Rescrape metadata fetched: ${info.title.ifBlank { number }}")
         rewriteScrapeFilesInPlace(target, info)
         logStore.append("Movie rescrape finished: $number")
@@ -479,15 +519,17 @@ class StrmScrapeRepository(
             runCatching {
                 logStore.append("Scraping $number, file=${target.file.name}")
                 appendMovieDivider("Start batch movie scrape", number, target.file.name.orEmpty(), source)
-                logStore.append("Collect all metadata sources for batch scrape: $number")
-                val scrapedInfo = scraperRegistry.scrapeWithFallback(
-                    preferred = source,
+                logStore.append("Use DMM/FANZA priority scrape chain for batch: $number")
+                val scrapedInfo = scraperRegistry.scrapeWithDmmPriority(
                     number = number,
-                    excludedSources = excludedSources,
-                    collectAllSources = true
+                    excludedSources = excludedSources
                 )
                 val info = scrapedInfo.withResolvedActorAliases(
-                    downloadActorAvatars(scrapedInfo, reuseMergedActorIdentities = true)
+                    downloadActorAvatars(
+                        scrapedInfo,
+                        allowExternalActorSources = scrapedInfo.source !in setOf("dmm2", "dmm"),
+                        reuseMergedActorIdentities = true
+                    )
                 )
                 logStore.append("Metadata fetched: $number")
                 writeOrganizedScrapeFiles(target, info, number)
@@ -918,7 +960,8 @@ class StrmScrapeRepository(
         allowSourceImages: Boolean = true,
         allowGfriends: Boolean = settingsRepository.isGfriendsActorAvatarEnabled(),
         forceRefresh: Boolean = false,
-        reuseMergedActorIdentities: Boolean = false
+        reuseMergedActorIdentities: Boolean = false,
+        allowExternalActorSources: Boolean = true
     ): Map<String, List<String>> {
         /*
          * ================================================================================
@@ -972,7 +1015,7 @@ class StrmScrapeRepository(
         suspend fun loadJavdbActors(): List<ActorAliasLookup> {
             if (javdbActorsLoaded) return javdbActors
             javdbActorsLoaded = true
-            if (!allowJavdbAliases || info.number.isBlank()) return emptyList()
+            if (!allowExternalActorSources || !allowJavdbAliases || info.number.isBlank()) return emptyList()
             if (reuseMergedActorIdentities || info.source.equals("javdb", ignoreCase = true)) {
                 javdbActors = info.toActorAliasLookups()
                 return javdbActors
@@ -991,7 +1034,7 @@ class StrmScrapeRepository(
         suspend fun loadJavlibraryActors(): List<ActorAliasLookup> {
             if (javlibraryActorsLoaded) return javlibraryActors
             javlibraryActorsLoaded = true
-            if (!allowJavlibraryAliases || info.number.isBlank()) return emptyList()
+            if (!allowExternalActorSources || !allowJavlibraryAliases || info.number.isBlank()) return emptyList()
             if (reuseMergedActorIdentities || info.source.equals("javlibrary", ignoreCase = true)) {
                 javlibraryActors = info.toActorAliasLookups()
                 return javlibraryActors
@@ -1014,6 +1057,7 @@ class StrmScrapeRepository(
             val knownNames = (actorNameParts(actorName) + persistedAliases.flatMap(::actorNameParts))
                 .filter { candidate -> candidate.isNotBlank() && !isNonActorCategoryName(candidate) }
                 .distinctBy { candidate -> candidate.normalizedActorName() }
+            if (!allowExternalActorSources) return emptyList()
             return listOf(loadJavdbActors(), loadJavlibraryActors())
                 .flatMap { sourceActors ->
                     val matchedActors = sourceActors.filter { externalActor ->
@@ -1166,7 +1210,7 @@ class StrmScrapeRepository(
             }
 
             // 8.2 用 JavDB、JavLibrary 影片演员名补齐本地头像别名，再用别名回查 DMM/FANZA。
-            if (allowJavdbAliases || allowJavlibraryAliases) {
+            if (allowExternalActorSources && (allowJavdbAliases || allowJavlibraryAliases)) {
                 val aliases = loadActorAliases()
                 if (aliases.isNotEmpty()) {
                     resolvedActorAliases[actorName] = aliases
@@ -1226,7 +1270,7 @@ class StrmScrapeRepository(
                     tryDownload(url, "gfriends", referer = null)
                 }
             }
-            if ((allowJavdbAliases || allowJavlibraryAliases) && saved) {
+            if (allowExternalActorSources && (allowJavdbAliases || allowJavlibraryAliases) && saved) {
                 copyExistingAvatarToAliases(
                     loadActorAliases(),
                     "JavDB/JavLibrary"

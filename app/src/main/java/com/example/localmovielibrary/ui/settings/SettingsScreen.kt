@@ -1059,7 +1059,7 @@ private fun ScrapeSettingsPage(
         onSelected = onSourceSelected
     )
     Text(
-        text = "首选源无结果时自动尝试其它资料源（DMM2、JavDB、JavLibrary、JavBus、DMM、Official）；MissAV 不参与自动回退。",
+        text = "默认、批量和重新刮削固定先查 DMM/FANZA；未命中后收集 JavLibrary、JavBus、JavDB。MissAV 不参与自动链。",
         color = Color.White.copy(alpha = 0.62f),
         style = MaterialTheme.typography.bodySmall
     )

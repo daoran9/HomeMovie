@@ -40,16 +40,16 @@ class DmmScraper(
      * ================================================================================
      * 步骤1：从旧 DMM 搜索页选择同番号详情页
      * ================================================================================
-     * 目标：多个搜索结果同时出现时，优先同厂牌同序号的 content id。
+     * 目标：多个搜索结果同时出现时，只接受同厂牌同序号的 content id。
      * 数据源：旧 DMM 搜索页中的 cid 详情链接。
      * 操作：
      * 1) 提取所有影片详情链接并转换为绝对地址。
-     * 2) 复用 DMM2 的完整番号评分，保留兼容回退。
+     * 2) 复用 DMM2 的完整番号评分，拒绝只有前缀或后缀相似的结果。
      */
     internal fun selectDetailUrl(html: String, number: String): String? {
         val keyword = normalizeDmmSearchKeyword(number)
         val cidPattern = Regex("""(?:^|[?/=])cid=([^/?&"']+)""", RegexOption.IGNORE_CASE)
-        return Regex("""<a[^>]+href=["']([^"']*/detail/=/cid=[^"']+)["']""", RegexOption.IGNORE_CASE)
+        val detailUrl = Regex("""<a[^>]+href=["']([^"']*/detail/=/cid=[^"']+)["']""", RegexOption.IGNORE_CASE)
             .findAll(html)
             .mapNotNull { match ->
                 match.groupValues.getOrNull(1)?.takeIf { link -> link.isNotBlank() }
@@ -65,6 +65,8 @@ class DmmScraper(
                 val contentId = cidPattern.find(detailUrl)?.groupValues?.getOrNull(1).orEmpty()
                 dmmContentIdMatchScore(contentId, keyword)
             }
+        val contentId = detailUrl?.let { cidPattern.find(it)?.groupValues?.getOrNull(1).orEmpty() }.orEmpty()
+        return detailUrl?.takeIf { dmmContentIdMatchScore(contentId, keyword) >= 900 }
     }
 
     private fun parseDetail(html: String, detailUrl: String, number: String): ScrapedMovieInfo {

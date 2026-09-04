@@ -27,6 +27,148 @@ class MovieScraperRegistry(
 
     /*
      * ================================================================================
+     * 步骤2：按 DMM/FANZA 优先规则自动刮削
+     * ================================================================================
+     * 目标：把自动刮削拆成“官方命中”和“外部后备”两条互斥分支。
+     * 数据源：DMM/FANZA、旧 DMM、JavLibrary、JavBus、JavDB 和当前番号。
+     * 操作：
+     * 1) 先严格查询 DMM/FANZA；命中后只允许旧 DMM 补同一官方家族缺失字段。
+     * 2) DMM/FANZA 未命中时，完整收集 JL、JB、JavDB，再按字段职责融合。
+     * 3) 外部后备分支不查询旧 DMM，避免把非官方结果混入官方未命中分支。
+     */
+    suspend fun scrapeWithDmmPriority(
+        number: String,
+        excludedSources: Set<ScrapeSource> = emptySet(),
+        sourceTimeoutMs: Long = DEFAULT_SOURCE_TIMEOUT_MS
+    ): ScrapedMovieInfo {
+        logger?.invoke("开始 DMM/FANZA 优先自动刮削：number=$number")
+        var lastError: Throwable? = null
+        data class CollectedSource(val source: ScrapeSource, val info: ScrapedMovieInfo)
+        val collected = mutableListOf<CollectedSource>()
+
+        suspend fun collect(source: ScrapeSource): ScrapedMovieInfo? {
+            if (source in excludedSources) {
+                logger?.invoke("自动刮削跳过来源：number=$number, source=${source.name}")
+                return null
+            }
+            val scraper = scrapersBySource[source] ?: return null
+            return try {
+                // 2.1 每个来源独立限时，失败后由当前分支决定是否继续。
+                val timeout = if (source in webViewBackedSources) {
+                    webViewSourceTimeoutMs
+                } else {
+                    sourceTimeoutMs
+                }
+                val info = withTimeout(timeout.coerceAtLeast(1_000L)) {
+                    scraper.scrape(number)
+                }
+                collected += CollectedSource(source, info)
+                logger?.invoke("自动刮削源成功：number=$number, source=${source.name}")
+                info
+            } catch (error: TimeoutCancellationException) {
+                lastError = error
+                logger?.invoke("自动刮削源超时：number=$number, source=${source.name}")
+                null
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                lastError = error
+                logger?.invoke(
+                    "自动刮削源失败：number=$number, source=${source.name}, " +
+                        "reason=${error.message ?: error::class.java.simpleName}"
+                )
+                null
+            }
+        }
+
+        /*
+         * ================================================================================
+         * 步骤3：处理官方命中分支
+         * ================================================================================
+         * 目标：DMM/FANZA 命中后不让外部站点改变影片和演员名单。
+         * 数据源：DMM2 详情和旧 DMM 详情。
+         * 操作：
+         * 1) DMM2 成功即视为严格番号命中。
+         * 2) 旧 DMM 只补 DMM2 为空的字段，演员仍按官方结果处理。
+         */
+        val dmm2Info = collect(ScrapeSource.Dmm2)
+        if (dmm2Info != null) {
+            val dmmInfo = collect(ScrapeSource.Dmm)
+            val merged = mergeInfos(listOf(dmm2Info)).let { official ->
+                official.copy(
+                    runtime = official.runtime.ifBlank { dmmInfo?.runtime.orEmpty() },
+                    directors = official.directors.ifEmpty { dmmInfo?.directors.orEmpty() },
+                    trailer = official.trailer.ifBlank { dmmInfo?.trailer.orEmpty() }
+                )
+            }
+            logger?.invoke(
+                "DMM/FANZA 命中，停止外部来源：number=$number, " +
+                    "sources=${collected.joinToString { it.source.name }}"
+            )
+            return merged
+        }
+
+        /*
+         * ================================================================================
+         * 步骤4：处理外部后备分支
+         * ================================================================================
+         * 目标：DMM/FANZA 未命中时，让三个外部来源共同提供证据。
+         * 数据源：JavLibrary、JavBus、JavDB。
+         * 操作：
+         * 1) 三个来源全部尝试，JL 作为结构化资料和演员主名基准。
+         * 2) JB 优先提供简介，JavDB 提供性别排除和其它演员证据。
+         * 3) 三源类型和标签合并去重；评分只接受 JL 的有效值。
+         */
+        listOf(ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb)
+            .forEach { source -> collect(source) }
+
+        val fallbackResults = collected
+            .filter { it.source in EXTERNAL_FALLBACK_SOURCES }
+            .map { it.info }
+        if (fallbackResults.isNotEmpty()) {
+            fun firstNonBlank(infos: List<ScrapedMovieInfo>, selector: (ScrapedMovieInfo) -> String): String =
+                infos.asSequence().map(selector).firstOrNull { it.isNotBlank() }.orEmpty()
+
+            fun mergedValues(selector: (ScrapedMovieInfo) -> List<String>): List<String> =
+                fallbackResults
+                    .flatMap(selector)
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() && !isNonActorCategoryName(it) }
+                    .distinct()
+
+            val structuralResults = fallbackResults
+            val narrativeResults = listOf(ScrapeSource.Javbus, ScrapeSource.Javdb, ScrapeSource.Javlibrary)
+                .mapNotNull { source ->
+                    collected.firstOrNull { it.source == source }?.info
+                }
+            val javlibraryRating = collected
+                .firstOrNull { it.source == ScrapeSource.Javlibrary }
+                ?.info
+                ?.rating
+                .orEmpty()
+            val merged = mergeInfos(structuralResults)
+            val result = merged.copy(
+                plot = firstNonBlank(narrativeResults) { it.plot },
+                outline = firstNonBlank(narrativeResults) { it.outline },
+                genres = mergedValues { it.genres },
+                tags = mergedValues { it.tags },
+                rating = javlibraryRating,
+                thumbUrl = firstNonBlank(structuralResults) { it.thumbUrl },
+                posterUrl = firstNonBlank(structuralResults) { it.posterUrl }
+            ).canonicalizeActorIdentities()
+            logger?.invoke(
+                "DMM/FANZA 未命中，完成外部后备融合：number=$number, " +
+                    "sources=${collected.joinToString { it.source.name }}"
+            )
+            return result
+        }
+
+        val detail = lastError?.message ?: lastError?.javaClass?.simpleName ?: "未知错误"
+        throw IllegalStateException("DMM/FANZA 和外部后备源均失败：$number，最后错误：$detail", lastError)
+    }
+
+    /*
+     * ================================================================================
      * 步骤1：按优先级回退并融合刮削源
      * ================================================================================
      * 目标：复用 Fusion 的“优先源 + 后备源补缺”策略，避免单一站点结果不完整。
@@ -510,6 +652,11 @@ class MovieScraperRegistry(
     }
 
     private companion object {
+        val EXTERNAL_FALLBACK_SOURCES = setOf(
+            ScrapeSource.Javlibrary,
+            ScrapeSource.Javbus,
+            ScrapeSource.Javdb
+        )
         val DEFAULT_FALLBACK_ORDER = listOf(
             ScrapeSource.Dmm2,
             ScrapeSource.Javdb,
@@ -565,7 +712,7 @@ internal fun isActorIdentityImageUrl(url: String): Boolean {
     return normalized.isNotBlank() &&
         normalized != "null" &&
         !Regex("now[_-]?printing|no[_-]?(?:image|photo)|placeholder").containsMatchIn(normalized) &&
-        ("/avatars/" in normalized || "/actjpgs/" in normalized)
+        ("/avatars/" in normalized || "/actjpgs/" in normalized || "/pics/actress/" in normalized)
 }
 
 internal fun isOfficialDmmActorImageUrl(url: String): Boolean {

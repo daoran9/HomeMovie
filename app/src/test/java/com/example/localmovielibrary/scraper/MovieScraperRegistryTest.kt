@@ -10,6 +10,123 @@ import org.junit.Test
 
 class MovieScraperRegistryTest {
     @Test
+    fun scrapeWithDmmPriorityStopsExternalSourcesAfterOfficialHit() = runBlocking {
+        val calls = mutableListOf<ScrapeSource>()
+        val registry = MovieScraperRegistry(
+            listOf(
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Dmm2,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "官方标题",
+                        actors = listOf("官方演员"),
+                        thumbUrl = "https://images.example/dmm-thumb.jpg",
+                        source = "dmm2"
+                    )
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Dmm,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "旧 DMM 标题",
+                        runtime = "120",
+                        actors = listOf("旧演员"),
+                        source = "dmm"
+                    )
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    calls,
+                    ScrapedMovieInfo(number = "ABC-123", title = "外部标题", source = "javlibrary")
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javbus,
+                    calls,
+                    ScrapedMovieInfo(number = "ABC-123", title = "外部标题", source = "javbus")
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    calls,
+                    ScrapedMovieInfo(number = "ABC-123", title = "外部标题", source = "javdb")
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("ABC-123")
+
+        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm), calls)
+        assertEquals("官方标题", info.title)
+        assertEquals("120", info.runtime)
+        assertEquals(listOf("官方演员"), info.actors)
+    }
+
+    @Test
+    fun scrapeWithDmmPriorityCollectsAllExternalSourcesAfterOfficialMiss() = runBlocking {
+        val calls = mutableListOf<ScrapeSource>()
+        val registry = MovieScraperRegistry(
+            listOf(
+                RecordingInfoMovieScraper(ScrapeSource.Dmm2, calls, fail = true),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "JL 标题",
+                        premiered = "2024-01-01",
+                        rating = "7.8",
+                        actors = listOf("演员甲"),
+                        genres = listOf("剧情"),
+                        source = "javlibrary"
+                    )
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javbus,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "JB 标题",
+                        plot = "JB 简介",
+                        actors = listOf("演员甲"),
+                        genres = listOf("办公室"),
+                        source = "javbus"
+                    )
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "JavDB 标题",
+                        plot = "JavDB 简介",
+                        actors = listOf("演员甲"),
+                        genres = listOf("熟女"),
+                        source = "javdb"
+                    )
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Dmm,
+                    calls,
+                    ScrapedMovieInfo(number = "ABC-123", title = "旧 DMM 不应请求", source = "dmm")
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("ABC-123")
+
+        assertEquals(
+            listOf(ScrapeSource.Dmm2, ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb),
+            calls
+        )
+        assertEquals("JL 标题", info.title)
+        assertEquals("JB 简介", info.plot)
+        assertEquals("7.8", info.rating)
+        assertEquals(listOf("剧情", "办公室", "熟女"), info.genres)
+        assertEquals(listOf("演员甲"), info.actors)
+    }
+
+    @Test
     fun scrapeRoutesToMatchingSource() = runBlocking {
         val registry = MovieScraperRegistry(
             listOf(
@@ -937,6 +1054,19 @@ class MovieScraperRegistryTest {
         private val info: ScrapedMovieInfo
     ) : MovieScraper {
         override suspend fun scrape(number: String): ScrapedMovieInfo = info.copy(number = number)
+    }
+
+    private class RecordingInfoMovieScraper(
+        override val source: ScrapeSource,
+        private val calls: MutableList<ScrapeSource>,
+        private val info: ScrapedMovieInfo? = null,
+        private val fail: Boolean = false
+    ) : MovieScraper {
+        override suspend fun scrape(number: String): ScrapedMovieInfo {
+            calls += source
+            if (fail) error("测试源失败")
+            return (info ?: error("测试源未配置结果")).copy(number = number)
+        }
     }
 
     private class DelayedMovieScraper(

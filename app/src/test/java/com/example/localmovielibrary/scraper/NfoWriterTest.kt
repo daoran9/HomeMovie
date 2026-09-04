@@ -63,9 +63,10 @@ class NfoWriterTest {
     }
 
     @Test
-    fun build_writesOnlyOfficialDmmActorImages() {
+    fun build_writesExplicitlyBoundActorImages() {
         val jdbAvatar = "https://c0.jdbstatic.com/avatars/yn/Yn256.jpg"
         val dmmAvatar = "https://awsimgsrc.dmm.co.jp/pics_dig/mono/actjpgs/actor.jpg"
+        val javbusAvatar = "https://www.javbus.com/pics/actress/actor.jpg"
 
         val jdbNfo = NfoWriter.build(
             ScrapedMovieInfo(number = "ABC-123", title = "示例影片", actors = listOf("演员甲"), actorImageUrls = mapOf("演员甲" to jdbAvatar))
@@ -74,8 +75,13 @@ class NfoWriterTest {
             ScrapedMovieInfo(number = "ABC-123", title = "示例影片", actors = listOf("演员甲"), actorImageUrls = mapOf("演员甲" to dmmAvatar))
         )
 
-        assertFalse(jdbNfo.contains(jdbAvatar))
+        assertTrue(jdbNfo.contains("<thumb>$jdbAvatar</thumb>"))
         assertTrue(dmmNfo.contains("<thumb>$dmmAvatar</thumb>"))
+
+        val javbusNfo = NfoWriter.build(
+            ScrapedMovieInfo(number = "ABC-123", title = "示例影片", actors = listOf("演员甲"), actorImageUrls = mapOf("演员甲" to javbusAvatar))
+        )
+        assertTrue(javbusNfo.contains("<thumb>$javbusAvatar</thumb>"))
     }
 
     @Test

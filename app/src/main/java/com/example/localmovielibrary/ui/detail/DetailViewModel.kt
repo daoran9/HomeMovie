@@ -155,7 +155,12 @@ class DetailViewModel(
     }
 
     fun scrapeWithDefault() {
-        scrapeCurrent(scrapeRepository.getDefaultScrapeSource(), allowCookieRefresh = true)
+        val source = scrapeRepository.getDefaultScrapeSource()
+        scrapeCurrent(
+            source,
+            allowCookieRefresh = true,
+            automaticPriority = source != ScrapeSource.Missav
+        )
     }
 
     fun scrapeWithDmm() {
@@ -187,7 +192,12 @@ class DetailViewModel(
     }
 
     fun rescrapeWithDefault() {
-        rescrapeCurrent(scrapeRepository.getDefaultScrapeSource(), allowCookieRefresh = true)
+        val source = scrapeRepository.getDefaultScrapeSource()
+        rescrapeCurrent(
+            source,
+            allowCookieRefresh = true,
+            automaticPriority = source != ScrapeSource.Missav
+        )
     }
 
     fun rescrapeWithDmm() {
@@ -286,14 +296,22 @@ class DetailViewModel(
         }
     }
 
-    private fun scrapeCurrent(source: ScrapeSource, allowCookieRefresh: Boolean) {
+    private fun scrapeCurrent(
+        source: ScrapeSource,
+        allowCookieRefresh: Boolean,
+        automaticPriority: Boolean = false
+    ) {
         val current = movie.value ?: return
         if (_isScraping.value) return
         scrapeScope.launch {
             _isScraping.value = true
             events.trySend(DetailEvent.Message("开始${source.displayName}刮削..."))
             runCatching {
-                val result = scrapeRepository.scrapeMovieWithOutput(current, source)
+                val result = scrapeRepository.scrapeMovieWithOutput(
+                    movie = current,
+                    source = source,
+                    automaticPriority = automaticPriority
+                )
                 scrapeRepository.appendLog("开始刷新单个影片，刷新整理后的文件")
                 refreshScrapedMovie(current, result.info.number, result.strmUri)
             }.onSuccess {
@@ -333,14 +351,22 @@ class DetailViewModel(
         return repository.findMovieByNumber(current.libraryRootUri, number)?.id
     }
 
-    private fun rescrapeCurrent(source: ScrapeSource, allowCookieRefresh: Boolean) {
+    private fun rescrapeCurrent(
+        source: ScrapeSource,
+        allowCookieRefresh: Boolean,
+        automaticPriority: Boolean = false
+    ) {
         val current = movie.value ?: return
         if (_isScraping.value) return
         scrapeScope.launch {
             _isScraping.value = true
             events.trySend(DetailEvent.Message("开始用 ${source.displayName} 重新刮削..."))
             runCatching {
-                scrapeRepository.rescrapeMovie(current, source)
+                scrapeRepository.rescrapeMovie(
+                    movie = current,
+                    source = source,
+                    automaticPriority = automaticPriority
+                )
                 repository.refreshMovieRecoveringMovedStrm(current.id)
             }.onSuccess {
                 _isScraping.value = false
