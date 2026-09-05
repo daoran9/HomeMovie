@@ -415,38 +415,51 @@ class MovieRepository(
         movieDao.deleteById(movieId)
     }
 
+    /*
+     * ================================================================================
+     * 步骤3：删除本地 STRM 影片
+     * ================================================================================
+     * 目标：只删除当前影片的文件，不能把共享演员目录当成影片目录。
+     * 数据源：Room 影片 URI、SAF 文档树和 STRM 中记录的 pickcode。
+     * 操作：
+     * 1) 目录名能确认属于同一番号时，删除完整影片目录及其多播放源。
+     * 2) 根层或共享演员目录中的单个 STRM 只删除该文件。
+     * 3) SAF 删除失败时保留 Room 和网盘索引，向界面返回失败原因。
+     */
     suspend fun deleteMovieWithFiles(movieId: Long): DeleteMovieResult = withContext(Dispatchers.IO) {
+        Log.i(TAG, "开始删除本地影片：movieId=$movieId")
         val movie = movieDao.getMovieLite(movieId)
         val pickcodes = linkedSetOf<String>()
         if (movie != null && movie.videoName.endsWith(".strm", ignoreCase = true)) {
             val root = DocumentFile.fromTreeUri(context, Uri.parse(movie.libraryRootUri))
-            val target = root?.let {
-                findFileWithParentFast(it, movie.libraryRootUri, movie.videoUri)
-                    ?: findFileWithParent(it, movie.videoUri)
-                    ?: findStrmWithParentByMovieNumber(it, movie)
+                ?: return@withContext DeleteMovieResult.failed(movieId, "无法访问影片库目录，未删除本地记录")
+            val target = findFileWithParentFast(root, movie.libraryRootUri, movie.videoUri)
+                ?: findFileWithParent(root, movie.videoUri)
+                ?: findStrmWithParentByMovieNumber(root, movie)
+                ?: return@withContext DeleteMovieResult.failed(movieId, "未找到本地 STRM，未删除本地记录")
+            val movieDirectory = target.parent.takeIf { directory ->
+                directory.uri != root.uri && isDedicatedMovieDirectoryName(directory.name, movie.videoName)
             }
-            if (target != null) {
-                val movieDirectory = target.parent.takeIf { it.uri != root.uri }
-                val actorDirectory = movieDirectory
-                    ?.parentFile
-                    ?.takeIf { it.uri != root.uri }
-                val filesToRead = if (target.parent.uri != root.uri) {
-                    target.parent.listFiles().filter { it.isFile && it.name.orEmpty().endsWith(".strm", ignoreCase = true) }
-                } else {
-                    listOf(target.file)
-                }
-                filesToRead.forEach { file ->
-                    readPickcode(file)?.let { pickcodes += it }
-                }
-                if (target.parent.uri != root.uri) {
-                    deleteRecursively(target.parent)
-                    cleanupEmptyActorDirectory(actorDirectory, root)
-                } else {
-                    target.file.delete()
-                }
+            val actorDirectory = movieDirectory
+                ?.parentFile
+                ?.takeIf { it.uri != root.uri }
+            val filesToRead = movieDirectory?.listFiles()
+                ?.filter { it.isFile && it.name.orEmpty().endsWith(".strm", ignoreCase = true) }
+                ?: listOf(target.file)
+            filesToRead.forEach { file ->
+                readPickcode(file)?.let { pickcodes += it }
+            }
+            val deleted = movieDirectory?.let(::deleteRecursively) ?: target.file.delete()
+            if (!deleted) {
+                Log.w(TAG, "删除本地影片失败：movieId=$movieId, uri=${target.file.uri}")
+                return@withContext DeleteMovieResult.failed(movieId, "本地文件删除失败，未删除本地记录")
+            }
+            if (movieDirectory != null) {
+                cleanupEmptyActorDirectory(actorDirectory, root)
             }
         }
         movieDao.deleteById(movieId)
+        Log.i(TAG, "本地影片删除完成：movieId=$movieId, pickcodes=${pickcodes.size}")
         DeleteMovieResult(movieId = movieId, pickcodes = pickcodes)
     }
 
@@ -837,11 +850,12 @@ class MovieRepository(
         )
     }
 
-    private fun deleteRecursively(file: DocumentFile) {
+    private fun deleteRecursively(file: DocumentFile): Boolean {
         if (file.isDirectory) {
-            file.listFiles().forEach { deleteRecursively(it) }
+            val childrenDeleted = file.listFiles().all(::deleteRecursively)
+            if (!childrenDeleted) return false
         }
-        file.delete()
+        return file.delete()
     }
 
     private fun cleanupEmptyActorDirectory(actorDirectory: DocumentFile?, root: DocumentFile) {
@@ -1020,8 +1034,23 @@ private fun encodeStrmPathSegment(value: String): String =
 
 data class DeleteMovieResult(
     val movieId: Long,
-    val pickcodes: Set<String>
-)
+    val pickcodes: Set<String>,
+    val errorMessage: String? = null
+) {
+    val isSuccess: Boolean
+        get() = errorMessage == null
+
+    companion object {
+        fun failed(movieId: Long, message: String): DeleteMovieResult =
+            DeleteMovieResult(movieId = movieId, pickcodes = emptySet(), errorMessage = message)
+    }
+}
+
+internal fun isDedicatedMovieDirectoryName(directoryName: String?, videoName: String): Boolean {
+    val directoryNumber = extractMovieNumberInfo(directoryName.orEmpty())?.number ?: return false
+    val movieNumber = extractMovieNumberInfo(videoName)?.number ?: return false
+    return directoryNumber == movieNumber
+}
 
 private data class FileWithParent(
     val parent: DocumentFile,

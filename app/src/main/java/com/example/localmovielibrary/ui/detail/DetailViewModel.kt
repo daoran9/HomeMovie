@@ -132,6 +132,10 @@ class DetailViewModel(
         val current = movie.value ?: return
         viewModelScope.launch {
             val result = repository.deleteMovieWithFiles(current.id)
+            if (!result.isSuccess) {
+                events.send(DetailEvent.Message(result.errorMessage ?: "删除失败，本地记录未删除"))
+                return@launch
+            }
             cloudStrmRecordRepository.deleteForMovie(current.id, result.pickcodes)
             events.send(DetailEvent.Deleted)
         }

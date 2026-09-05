@@ -1019,8 +1019,7 @@ class StrmScrapeRepository(
         var javlibraryActorsLoaded = false
         var javlibraryActors = emptyList<ActorAliasLookup>()
         val resolvedActorAliases = mutableMapOf<String, List<String>>()
-        val allowKnownAliasDmmLookup = allowExternalActorSources &&
-            (allowJavdbAliases || allowJavlibraryAliases)
+        val allowKnownAliasDmmLookup = allowJavdbAliases || allowJavlibraryAliases
         if (reuseMergedActorIdentities) {
             logStore.append("Reuse merged actor identities for avatar aliases: ${info.number}")
         }

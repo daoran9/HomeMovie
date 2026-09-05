@@ -59,7 +59,38 @@ class MovieScraperRegistryTest {
         assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm), calls)
         assertEquals("官方标题", info.title)
         assertEquals("120", info.runtime)
-        assertEquals(listOf("官方演员"), info.actors)
+        assertEquals(listOf("官方演员", "旧演员"), info.actors)
+    }
+
+    @Test
+    fun scrapeWithDmmPriorityMergesLegacyDmmActorEvidence() = runBlocking {
+        val registry = MovieScraperRegistry(
+            listOf(
+                InfoMovieScraper(
+                    ScrapeSource.Dmm2,
+                    ScrapedMovieInfo(number = "ABC-123", title = "官方标题", source = "dmm2")
+                ),
+                InfoMovieScraper(
+                    ScrapeSource.Dmm,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "",
+                        actors = listOf("旧 DMM 演员"),
+                        actorAliases = mapOf("旧 DMM 演员" to listOf("官方别名")),
+                        actorImageUrls = mapOf("旧 DMM 演员" to "https://images.example/dmm-actor.jpg"),
+                        excludedActorNames = listOf("男性演员"),
+                        source = "dmm"
+                    )
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("ABC-123")
+
+        assertEquals(listOf("旧 DMM 演员"), info.actors)
+        assertEquals(listOf("官方别名"), info.actorAliases["旧 DMM 演员"])
+        assertEquals("https://images.example/dmm-actor.jpg", info.actorImageUrls["旧 DMM 演员"])
+        assertEquals(listOf("男性演员"), info.excludedActorNames)
     }
 
     @Test

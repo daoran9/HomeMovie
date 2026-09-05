@@ -87,34 +87,14 @@ class MovieScraperRegistry(
          * 数据源：DMM2 详情和旧 DMM 详情。
          * 操作：
          * 1) DMM2 成功即视为严格番号命中。
-         * 2) 旧 DMM 只补 DMM2 为空的字段，演员仍按官方结果处理。
+         * 2) 旧 DMM 与 DMM2 都属于官方资料，完整合并各自确认的演员、别名和头像证据。
          * 3) MSAJ 额外读取 JavLibrary 演员，非空时只替换演员和别名。
          */
         val dmm2Info = collect(ScrapeSource.Dmm2)
         if (dmm2Info != null) {
             val dmmInfo = collect(ScrapeSource.Dmm)
-            var merged = mergeInfos(listOf(dmm2Info)).let { official ->
-                official.copy(
-                    title = official.title.ifBlank { dmmInfo?.title.orEmpty() },
-                    originalTitle = official.originalTitle.ifBlank { dmmInfo?.originalTitle.orEmpty() },
-                    plot = official.plot.ifBlank { dmmInfo?.plot.orEmpty() },
-                    outline = official.outline.ifBlank { dmmInfo?.outline.orEmpty() },
-                    premiered = official.premiered.ifBlank { dmmInfo?.premiered.orEmpty() },
-                    year = official.year.ifBlank { dmmInfo?.year.orEmpty() },
-                    runtime = official.runtime.ifBlank { dmmInfo?.runtime.orEmpty() },
-                    studio = official.studio.ifBlank { dmmInfo?.studio.orEmpty() },
-                    publisher = official.publisher.ifBlank { dmmInfo?.publisher.orEmpty() },
-                    series = official.series.ifBlank { dmmInfo?.series.orEmpty() },
-                    directors = official.directors.ifEmpty { dmmInfo?.directors.orEmpty() },
-                    genres = official.genres.ifEmpty { dmmInfo?.genres.orEmpty() },
-                    tags = official.tags.ifEmpty { dmmInfo?.tags.orEmpty() },
-                    rating = official.rating.ifBlank { dmmInfo?.rating.orEmpty() },
-                    trailer = official.trailer.ifBlank { dmmInfo?.trailer.orEmpty() },
-                    website = official.website.ifBlank { dmmInfo?.website.orEmpty() },
-                    thumbUrl = official.thumbUrl.ifBlank { dmmInfo?.thumbUrl.orEmpty() },
-                    posterUrl = official.posterUrl.ifBlank { dmmInfo?.posterUrl.orEmpty() }
-                )
-            }
+            // 3.1 DMM2 保持字段优先级，旧 DMM 只补全同一官方家族的缺失证据。
+            var merged = mergeInfos(listOfNotNull(dmm2Info, dmmInfo))
 
             /*
              * ================================================================================
