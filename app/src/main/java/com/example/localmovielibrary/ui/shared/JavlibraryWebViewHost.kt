@@ -160,11 +160,6 @@ fun ScraperWebViewHost(fetcher: JavlibraryWebViewFetcher) {
                         return true
                     }
 
-                    override fun onPageCommitVisible(view: WebView?, url: String?) {
-                        super.onPageCommitVisible(view, url)
-                        capturePageHtml(view, "commit-visible")
-                    }
-
                     override fun onPageFinished(view: WebView?, url: String?) {
                         super.onPageFinished(view, url)
                         capturePageHtml(view, "page-finished")

@@ -66,7 +66,7 @@ class DmmScraper(
                 dmmContentIdMatchScore(contentId, keyword)
             }
         val contentId = detailUrl?.let { cidPattern.find(it)?.groupValues?.getOrNull(1).orEmpty() }.orEmpty()
-        return detailUrl?.takeIf { dmmContentIdMatchScore(contentId, keyword) >= 900 }
+        return detailUrl?.takeIf { dmmContentIdMatchScore(contentId, keyword) >= 850 }
     }
 
     private fun parseDetail(html: String, detailUrl: String, number: String): ScrapedMovieInfo {

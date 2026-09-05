@@ -569,6 +569,7 @@ internal fun dmmContentIdMatchScore(contentId: String, keyword: String): Int {
     val normalizedKeyword = keyword.trim().lowercase(Locale.ROOT)
     if (normalizedContentId.isBlank() || normalizedKeyword.isBlank()) return 0
 
+    val normalizedCatalogCode = normalizeDmmCatalogCode(normalizedKeyword)
     val exactCatalogCode = Regex(
         """(?:^|[^a-z])${Regex.escape(normalizedKeyword)}(?:$|[^a-z])""",
         RegexOption.IGNORE_CASE
@@ -576,6 +577,7 @@ internal fun dmmContentIdMatchScore(contentId: String, keyword: String): Int {
     var score = when {
         normalizedContentId == normalizedKeyword -> 1_000
         exactCatalogCode.containsMatchIn(normalizedContentId) -> 900
+        normalizedCatalogCode != null && normalizeDmmCatalogCode(normalizedContentId) == normalizedCatalogCode -> 850
         normalizedContentId.endsWith(normalizedKeyword) -> 200
         normalizedKeyword in normalizedContentId -> 150
         else -> 0
@@ -584,6 +586,11 @@ internal fun dmmContentIdMatchScore(contentId: String, keyword: String): Int {
         if (bad in normalizedContentId) score -= 30
     }
     return score
+}
+
+private fun normalizeDmmCatalogCode(value: String): String? {
+    val match = Regex("""^([a-z]+)(\d+)$""").find(value) ?: return null
+    return match.groupValues[1] + match.groupValues[2].trimStart('0').ifBlank { "0" }
 }
 
 internal fun isExactDmmContentId(contentId: String, expectedId: String): Boolean =

@@ -4,6 +4,7 @@ import android.content.ContentResolver
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.example.localmovielibrary.cloud115.Cloud115Client
@@ -431,31 +432,43 @@ class MovieRepository(
         val movie = movieDao.getMovieLite(movieId)
         val pickcodes = linkedSetOf<String>()
         if (movie != null && movie.videoName.endsWith(".strm", ignoreCase = true)) {
-            val root = DocumentFile.fromTreeUri(context, Uri.parse(movie.libraryRootUri))
-                ?: return@withContext DeleteMovieResult.failed(movieId, "无法访问影片库目录，未删除本地记录")
-            val target = findFileWithParentFast(root, movie.libraryRootUri, movie.videoUri)
-                ?: findFileWithParent(root, movie.videoUri)
-                ?: findStrmWithParentByMovieNumber(root, movie)
-                ?: return@withContext DeleteMovieResult.failed(movieId, "未找到本地 STRM，未删除本地记录")
-            val movieDirectory = target.parent.takeIf { directory ->
-                directory.uri != root.uri && isDedicatedMovieDirectoryName(directory.name, movie.videoName)
+            val rootUri = Uri.parse(movie.libraryRootUri)
+            val videoUri = Uri.parse(movie.videoUri)
+            val rootDocumentId = runCatching { DocumentsContract.getTreeDocumentId(rootUri) }.getOrNull()
+                ?: return@withContext DeleteMovieResult.failed(movieId, "影片库目录 URI 无效，未删除本地记录")
+            val videoDocumentId = runCatching { DocumentsContract.getDocumentId(videoUri) }.getOrNull()
+                ?: return@withContext DeleteMovieResult.failed(movieId, "本地 STRM URI 无效，未删除本地记录")
+            if (!isDocumentWithinTree(rootDocumentId, videoDocumentId)) {
+                return@withContext DeleteMovieResult.failed(movieId, "本地 STRM 不在当前影片库目录中，未删除本地记录")
             }
-            val actorDirectory = movieDirectory
-                ?.parentFile
-                ?.takeIf { it.uri != root.uri }
+            val target = DocumentFile.fromSingleUri(context, videoUri)
+                ?.takeIf { it.isFile }
+                ?: return@withContext DeleteMovieResult.failed(movieId, "未找到本地 STRM，未删除本地记录")
+            val parentDocumentId = videoDocumentId.substringBeforeLast('/', missingDelimiterValue = "")
+            val directParent = parentDocumentId
+                .takeIf { it.isNotBlank() && it != rootDocumentId }
+                ?.let { documentId ->
+                    DocumentFile.fromSingleUri(
+                        context,
+                        DocumentsContract.buildDocumentUriUsingTree(rootUri, documentId)
+                    )
+                }
+            val movieDirectory = dedicatedMovieDirectoryDocumentId(
+                rootDocumentId = rootDocumentId,
+                videoDocumentId = videoDocumentId,
+                parentName = directParent?.name,
+                videoName = movie.videoName
+            )?.let { directParent }
             val filesToRead = movieDirectory?.listFiles()
                 ?.filter { it.isFile && it.name.orEmpty().endsWith(".strm", ignoreCase = true) }
-                ?: listOf(target.file)
+                ?: listOf(target)
             filesToRead.forEach { file ->
                 readPickcode(file)?.let { pickcodes += it }
             }
-            val deleted = movieDirectory?.let(::deleteRecursively) ?: target.file.delete()
+            val deleted = movieDirectory?.let(::deleteRecursively) ?: target.delete()
             if (!deleted) {
-                Log.w(TAG, "删除本地影片失败：movieId=$movieId, uri=${target.file.uri}")
+                Log.w(TAG, "删除本地影片失败：movieId=$movieId, uri=${target.uri}")
                 return@withContext DeleteMovieResult.failed(movieId, "本地文件删除失败，未删除本地记录")
-            }
-            if (movieDirectory != null) {
-                cleanupEmptyActorDirectory(actorDirectory, root)
             }
         }
         movieDao.deleteById(movieId)
@@ -1050,6 +1063,21 @@ internal fun isDedicatedMovieDirectoryName(directoryName: String?, videoName: St
     val directoryNumber = extractMovieNumberInfo(directoryName.orEmpty())?.number ?: return false
     val movieNumber = extractMovieNumberInfo(videoName)?.number ?: return false
     return directoryNumber == movieNumber
+}
+
+internal fun isDocumentWithinTree(rootDocumentId: String, documentId: String): Boolean =
+    documentId == rootDocumentId || documentId.startsWith("$rootDocumentId/")
+
+internal fun dedicatedMovieDirectoryDocumentId(
+    rootDocumentId: String,
+    videoDocumentId: String,
+    parentName: String?,
+    videoName: String
+): String? {
+    if (!isDocumentWithinTree(rootDocumentId, videoDocumentId)) return null
+    val parentDocumentId = videoDocumentId.substringBeforeLast('/', missingDelimiterValue = "")
+    if (parentDocumentId.isBlank() || parentDocumentId == rootDocumentId) return null
+    return parentDocumentId.takeIf { isDedicatedMovieDirectoryName(parentName, videoName) }
 }
 
 private data class FileWithParent(

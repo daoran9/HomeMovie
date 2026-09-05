@@ -47,6 +47,13 @@ class Dmm2ScraperTest {
         assertTrue(exact > extendedPrefix)
     }
 
+    @Test
+    fun dmmContentIdMatchScoreAcceptsLeadingZeroVariantsOnlyWithinTheSameLabel() {
+        assertTrue(dmmContentIdMatchScore("dvmm344", "dvmm00344") >= 850)
+        assertTrue(dmmContentIdMatchScore("dvmm344", "dvmm00344") > dmmContentIdMatchScore("edvmm344", "dvmm00344"))
+        assertTrue(dmmContentIdMatchScore("dvmm344x", "dvmm00344") < 850)
+    }
+
     /*
      * ================================================================================
      * 步骤1：验证 DMM/FANZA 影片空结果重试

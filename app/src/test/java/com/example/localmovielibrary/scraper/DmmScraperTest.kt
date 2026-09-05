@@ -28,4 +28,17 @@ class DmmScraperTest {
 
         assertNull(scraper.selectDetailUrl(html, "NAMH-022"))
     }
+
+    @Test
+    fun selectDetailUrlAcceptsOnlyLeadingZeroDifferencesInTheSameCatalogCode() {
+        val html = """
+            <a href="/mono/dvd/-/detail/=/cid=2dvmm344/">DVMM-344</a>
+            <a href="/mono/dvd/-/detail/=/cid=dvmm344/">DVMM-344</a>
+        """.trimIndent()
+
+        assertEquals(
+            "https://www.dmm.co.jp/mono/dvd/-/detail/=/cid=dvmm344/",
+            scraper.selectDetailUrl(html, "DVMM-344")
+        )
+    }
 }
