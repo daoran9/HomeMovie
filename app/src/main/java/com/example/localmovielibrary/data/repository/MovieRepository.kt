@@ -443,38 +443,31 @@ class MovieRepository(
             if (!isDocumentWithinTree(rootDocumentId, videoDocumentId)) {
                 return@withContext DeleteMovieResult.failed(movieId, "本地 STRM 不在当前影片库目录中，未删除本地记录")
             }
-            val target = DocumentFile.fromSingleUri(context, videoUri)
+            val storedFile = DocumentFile.fromSingleUri(context, videoUri)
                 ?.takeIf { it.exists() }
-            if (target == null) {
+            if (storedFile == null) {
                 Log.i(TAG, "保存的本地 STRM 已不存在，仅删除失效记录：movieId=$movieId")
             } else {
-                if (!target.isFile) {
-                    return@withContext DeleteMovieResult.failed(movieId, "保存的本地 URI 不是文件，未删除本地记录")
-                }
-                val parentDocumentId = videoDocumentId.substringBeforeLast('/', missingDelimiterValue = "")
-                val directParent = parentDocumentId
-                    .takeIf { it.isNotBlank() && it != rootDocumentId }
-                    ?.let { documentId ->
-                        DocumentFile.fromSingleUri(
-                            context,
-                            DocumentsContract.buildDocumentUriUsingTree(rootUri, documentId)
-                        )?.takeIf { it.isDirectory }
-                    }
+                // 3.1 用保存的 URI 沿 SAF 树逐级定位，目录节点必须支持列出同目录播放源。
+                val root = DocumentFile.fromTreeUri(context, rootUri)
+                    ?: return@withContext DeleteMovieResult.failed(movieId, "无法访问影片库目录，未删除本地记录")
+                val target = findFileWithParentFast(root, movie.libraryRootUri, movie.videoUri)
+                    ?: return@withContext DeleteMovieResult.failed(movieId, "无法定位保存的本地 STRM，未删除本地记录")
                 val movieDirectory = dedicatedMovieDirectoryDocumentId(
                     rootDocumentId = rootDocumentId,
                     videoDocumentId = videoDocumentId,
-                    parentName = directParent?.name,
+                    parentName = target.parent.name,
                     videoName = movie.videoName
-                )?.let { directParent }
+                )?.let { target.parent }
                 val filesToRead = movieDirectory?.listFiles()
                     ?.filter { it.isFile && it.name.orEmpty().endsWith(".strm", ignoreCase = true) }
-                    ?: listOf(target)
+                    ?: listOf(target.file)
                 filesToRead.forEach { file ->
                     readPickcode(file)?.let { pickcodes += it }
                 }
-                val deleted = movieDirectory?.let(::deleteRecursively) ?: target.delete()
+                val deleted = movieDirectory?.let(::deleteRecursively) ?: target.file.delete()
                 if (!deleted) {
-                    Log.w(TAG, "删除本地影片失败：movieId=$movieId, uri=${target.uri}")
+                    Log.w(TAG, "删除本地影片失败：movieId=$movieId, uri=${target.file.uri}")
                     return@withContext DeleteMovieResult.failed(movieId, "本地文件删除失败，未删除本地记录")
                 }
             }
