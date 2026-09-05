@@ -423,10 +423,11 @@ class MovieRepository(
      * 目标：只删除当前影片的文件，不能把共享演员目录当成影片目录。
      * 数据源：Room 影片 URI、SAF 文档树和 STRM 中记录的 pickcode。
      * 操作：
-     * 1) 只沿保存的 SAF document ID 从影片库根目录逐层定位目标 STRM。
-     * 2) 目录名能确认属于同一番号时，删除完整影片目录及其多播放源。
-     * 3) 根层或共享演员目录中的单个 STRM 只删除该文件。
-     * 4) SAF 删除失败时保留 Room 和网盘索引，向界面返回失败原因。
+     * 1) 直接查询保存的 SAF document URI，不按番号寻找其他 STRM。
+     * 2) 保存 URI 已不存在时，只删除失效本地记录，不删除其他实体文件。
+     * 3) 目录名能确认属于同一番号时，删除完整影片目录及其多播放源。
+     * 4) 根层或共享演员目录中的单个 STRM 只删除该文件。
+     * 5) SAF 删除失败时保留 Room 和网盘索引，向界面返回失败原因。
      */
     suspend fun deleteMovieWithFiles(movieId: Long): DeleteMovieResult = withContext(Dispatchers.IO) {
         Log.i(TAG, "开始删除本地影片：movieId=$movieId")
@@ -442,28 +443,40 @@ class MovieRepository(
             if (!isDocumentWithinTree(rootDocumentId, videoDocumentId)) {
                 return@withContext DeleteMovieResult.failed(movieId, "本地 STRM 不在当前影片库目录中，未删除本地记录")
             }
-            val root = DocumentFile.fromTreeUri(context, rootUri)
-                ?: return@withContext DeleteMovieResult.failed(movieId, "无法访问影片库目录，未删除本地记录")
-            Log.i(TAG, "按保存路径定位本地 STRM：movieId=$movieId")
-            val target = findFileWithParentFast(root, movie.libraryRootUri, movie.videoUri)
-                ?: return@withContext DeleteMovieResult.failed(movieId, "未找到本地 STRM，未删除本地记录")
-            Log.i(TAG, "已定位本地 STRM：movieId=$movieId, uri=${target.file.uri}")
-            val movieDirectory = dedicatedMovieDirectoryDocumentId(
-                rootDocumentId = rootDocumentId,
-                videoDocumentId = videoDocumentId,
-                parentName = target.parent.name,
-                videoName = movie.videoName
-            )?.let { target.parent }
-            val filesToRead = movieDirectory?.listFiles()
-                ?.filter { it.isFile && it.name.orEmpty().endsWith(".strm", ignoreCase = true) }
-                ?: listOf(target.file)
-            filesToRead.forEach { file ->
-                readPickcode(file)?.let { pickcodes += it }
-            }
-            val deleted = movieDirectory?.let(::deleteRecursively) ?: target.file.delete()
-            if (!deleted) {
-                Log.w(TAG, "删除本地影片失败：movieId=$movieId, uri=${target.file.uri}")
-                return@withContext DeleteMovieResult.failed(movieId, "本地文件删除失败，未删除本地记录")
+            val target = DocumentFile.fromSingleUri(context, videoUri)
+                ?.takeIf { it.exists() }
+            if (target == null) {
+                Log.i(TAG, "保存的本地 STRM 已不存在，仅删除失效记录：movieId=$movieId")
+            } else {
+                if (!target.isFile) {
+                    return@withContext DeleteMovieResult.failed(movieId, "保存的本地 URI 不是文件，未删除本地记录")
+                }
+                val parentDocumentId = videoDocumentId.substringBeforeLast('/', missingDelimiterValue = "")
+                val directParent = parentDocumentId
+                    .takeIf { it.isNotBlank() && it != rootDocumentId }
+                    ?.let { documentId ->
+                        DocumentFile.fromSingleUri(
+                            context,
+                            DocumentsContract.buildDocumentUriUsingTree(rootUri, documentId)
+                        )?.takeIf { it.isDirectory }
+                    }
+                val movieDirectory = dedicatedMovieDirectoryDocumentId(
+                    rootDocumentId = rootDocumentId,
+                    videoDocumentId = videoDocumentId,
+                    parentName = directParent?.name,
+                    videoName = movie.videoName
+                )?.let { directParent }
+                val filesToRead = movieDirectory?.listFiles()
+                    ?.filter { it.isFile && it.name.orEmpty().endsWith(".strm", ignoreCase = true) }
+                    ?: listOf(target)
+                filesToRead.forEach { file ->
+                    readPickcode(file)?.let { pickcodes += it }
+                }
+                val deleted = movieDirectory?.let(::deleteRecursively) ?: target.delete()
+                if (!deleted) {
+                    Log.w(TAG, "删除本地影片失败：movieId=$movieId, uri=${target.uri}")
+                    return@withContext DeleteMovieResult.failed(movieId, "本地文件删除失败，未删除本地记录")
+                }
             }
         }
         movieDao.deleteById(movieId)
