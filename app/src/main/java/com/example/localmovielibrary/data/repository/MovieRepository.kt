@@ -74,6 +74,10 @@ class MovieRepository(
         movieDao.getMoviesForMetadataLookupLite()
     }
 
+    suspend fun getFavoriteMoviesForMetadataRepair(): List<MovieEntity> = withContext(Dispatchers.IO) {
+        movieDao.getFavoriteMoviesForMetadataLookupLite()
+    }
+
     private suspend fun loadMovieListItems(favoritesOnly: Boolean): List<MovieEntity> = withContext(Dispatchers.IO) {
         val result = mutableListOf<MovieListItem>()
         var offset = 0

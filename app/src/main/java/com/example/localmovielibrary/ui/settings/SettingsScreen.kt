@@ -28,7 +28,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.Article
 import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
+import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Public
@@ -71,6 +73,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -240,6 +244,8 @@ fun SettingsScreen(
                         onRefreshCacheSize = ::refreshImageCacheSize,
                         onClearImageCache = { showImageCacheDialog = true },
                         onUpdateMissingActorAvatars = viewModel::updateMissingActorAvatars,
+                        onRepairFavoriteMovieMetadata = viewModel::repairFavoriteMovieMetadata,
+                        onTestScrapeSource = viewModel::testScrapeSource,
                         onOpenJavdbWeb = onOpenJavdbWeb,
                         onOpenJavlibraryWeb = onOpenJavlibraryWeb,
                         onOpenLogs = onOpenScrapeLogs,
@@ -1048,6 +1054,8 @@ private fun ScrapeSettingsPage(
     onRefreshCacheSize: () -> Unit,
     onClearImageCache: () -> Unit,
     onUpdateMissingActorAvatars: () -> Unit,
+    onRepairFavoriteMovieMetadata: () -> Unit,
+    onTestScrapeSource: (ScrapeSource) -> Unit,
     onOpenJavdbWeb: () -> Unit,
     onOpenJavlibraryWeb: () -> Unit,
     onOpenLogs: () -> Unit,
@@ -1075,10 +1083,19 @@ private fun ScrapeSettingsPage(
         hasCookie = uiState.hasJavlibraryCookie,
         onOpenJavlibraryWeb = onOpenJavlibraryWeb
     )
+    ScraperProxyRoutingPanel(
+        dmmProbeMessage = uiState.dmmProbeMessage,
+        javdbProbeMessage = uiState.javdbProbeMessage,
+        testingSource = uiState.testingScrapeSource,
+        onTestSource = onTestScrapeSource
+    )
     ActorAvatarUpdatePanel(
         state = actorAvatarUpdateState,
         gfriendsEnabled = uiState.gfriendsActorAvatarEnabled,
-        onUpdate = onUpdateMissingActorAvatars
+        isRepairingFavorites = uiState.isRepairingFavoriteMetadata,
+        favoriteRepairMessage = uiState.favoriteMetadataRepairMessage,
+        onUpdate = onUpdateMissingActorAvatars,
+        onRepairFavorites = onRepairFavoriteMovieMetadata
     )
     SettingsSectionTitle("DMM2 跳过")
     Dmm2SkippedPrefixPanel(
@@ -1129,6 +1146,176 @@ private fun ScrapeSettingsPage(
         onOpenLogs = onOpenLogs
     )
 }
+
+/*
+ * ================================================================================
+ * 步骤1：展示来源分流规则
+ * ================================================================================
+ * 目标：说明来源分流原则，并提供一份可按订阅调整的 FlClash 示例。
+ * 数据源：当前订阅节点和 JavDB 的固定域名集合。
+ * 操作：
+ * 1) 用户按自己的代理软件和节点命名配置非日本出口。
+ * 2) FlClash 示例动态创建 HomeMovie-JavDB Selector；DMM/FANZA 保留订阅原有链路。
+ */
+@Composable
+private fun ScraperProxyRoutingPanel(
+    dmmProbeMessage: String?,
+    javdbProbeMessage: String?,
+    testingSource: ScrapeSource?,
+    onTestSource: (ScrapeSource) -> Unit
+) {
+    val clipboardManager = LocalClipboardManager.current
+    var copied by rememberSaveable { mutableStateOf(false) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.075f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            text = "代理分流参考",
+            color = Color.White,
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = "HomeMovie 不会配置代理。以下是 FlClash 示例；其他软件和订阅请按相同的域名分流原则调整。",
+            color = Color.White.copy(alpha = 0.68f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            text = CLASH_SOURCE_ROUTING_RULES,
+            color = Color.White.copy(alpha = 0.82f),
+            style = MaterialTheme.typography.bodySmall,
+            fontFamily = FontFamily.Monospace
+        )
+        Text(
+            text = "示例按常见美国节点名称创建 HomeMovie-JavDB Selector。节点命名不同时，需要修改脚本里的筛选条件。",
+            color = Color.White.copy(alpha = 0.56f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            text = FLCLASH_SOURCE_ROUTING_GUIDE,
+            color = Color.White.copy(alpha = 0.68f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            text = "DMM/FANZA：${dmmProbeMessage ?: "尚未测试"}",
+            color = Color.White.copy(alpha = 0.68f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Text(
+            text = "JavDB：${javdbProbeMessage ?: "尚未测试"}",
+            color = Color.White.copy(alpha = 0.68f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Button(
+                onClick = { onTestSource(ScrapeSource.Dmm2) },
+                enabled = testingSource == null,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                if (testingSource == ScrapeSource.Dmm2) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.padding(end = 8.dp).heightIn(max = 18.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White
+                    )
+                }
+                Text("测试 DMM")
+            }
+            Button(
+                onClick = { onTestSource(ScrapeSource.Javdb) },
+                enabled = testingSource == null,
+                modifier = Modifier.weight(1f),
+                shape = RoundedCornerShape(18.dp)
+            ) {
+                if (testingSource == ScrapeSource.Javdb) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.padding(end = 8.dp).heightIn(max = 18.dp),
+                        strokeWidth = 2.dp,
+                        color = Color.White
+                    )
+                }
+                Text("测试 JavDB")
+            }
+        }
+        OutlinedButton(
+            onClick = {
+                Log.i(SCRAPER_ROUTING_TAG, "步骤1开始：复制 FlClash 分流示例")
+                clipboardManager.setText(AnnotatedString(FLCLASH_ROUTING_SCRIPT))
+                copied = true
+                Log.i(SCRAPER_ROUTING_TAG, "步骤1结束：FlClash 分流示例已复制")
+            },
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Icon(Icons.Rounded.ContentCopy, contentDescription = null)
+            Text(if (copied) "已复制示例脚本" else "复制 FlClash 示例脚本")
+        }
+        Text(
+            text = "在 HomeMovie-JavDB 手动选择未被 JavDB 封禁的节点，不要使用 URLTest。JavDB Cookie 页面也会走该策略组。",
+            color = Color.White.copy(alpha = 0.56f),
+            style = MaterialTheme.typography.bodySmall
+        )
+    }
+}
+
+private const val SCRAPER_ROUTING_TAG = "ScraperRouting"
+private const val CLASH_SOURCE_ROUTING_RULES =
+    "- DOMAIN-SUFFIX,jdbstatic.com,HomeMovie-JavDB\n" +
+        "- DOMAIN-SUFFIX,javdb.com,HomeMovie-JavDB"
+
+private const val FLCLASH_SOURCE_ROUTING_GUIDE =
+    "FlClash 0.8.96+ 示例：\n" +
+        "1. 按服务商说明导入订阅，确认原配置能正常启动。\n" +
+        "2. 此示例使用脚本覆写，不点“一键填入”；已有自定义内容需自行合并。\n" +
+        "3. 检查脚本的节点名称筛选，再在 HomeMovie-JavDB 手动选择可访问 JavDB 的节点。\n" +
+        "4. DMM/FANZA 沿用原策略组，手动选择实测可用的日本节点。\n" +
+        "5. 分别测试 DMM 和 JavDB。"
+
+private const val FLCLASH_ROUTING_SCRIPT =
+    "function main(config) {\n" +
+        "  const managedGroup = 'HomeMovie-JavDB';\n" +
+        "  const managedDomains = new Set(['jdbstatic.com', 'javdb.com']);\n" +
+        "  const groups = Array.isArray(config['proxy-groups']) ? config['proxy-groups'] : [];\n" +
+        "  const proxies = Array.isArray(config.proxies) ? config.proxies : [];\n" +
+        "  const nonjpProxies = proxies\n" +
+        "    .map((proxy) => proxy.name)\n" +
+        "    .filter((name) => typeof name === 'string' && /美国|美國|🇺🇸|United States|(?:^|[-_ |])US(?:$|[-_ |])/i.test(name));\n" +
+        "\n" +
+        "  config['proxy-groups'] = groups.filter((group) =>\n" +
+        "    String(group.name || '').toLowerCase() !== managedGroup.toLowerCase()\n" +
+        "  );\n" +
+        "\n" +
+        "  const rules = Array.isArray(config.rules) ? config.rules : [];\n" +
+        "  const keptRules = rules.filter((rule) => {\n" +
+        "    if (typeof rule !== 'string') return true;\n" +
+        "    const [type = '', domain = '', target = ''] = rule.split(',').map((part) => part.trim());\n" +
+        "    return !(\n" +
+        "      type.toUpperCase() === 'DOMAIN-SUFFIX' &&\n" +
+        "      managedDomains.has(domain.toLowerCase()) &&\n" +
+        "      target.toLowerCase() === managedGroup.toLowerCase()\n" +
+        "    );\n" +
+        "  });\n" +
+        "\n" +
+        "  if (nonjpProxies.length > 0) {\n" +
+        "    config['proxy-groups'].push({ name: managedGroup, type: 'select', proxies: nonjpProxies });\n" +
+        "    config.rules = [\n" +
+        "      'DOMAIN-SUFFIX,jdbstatic.com,HomeMovie-JavDB',\n" +
+        "      'DOMAIN-SUFFIX,javdb.com,HomeMovie-JavDB',\n" +
+        "      ...keptRules\n" +
+        "    ];\n" +
+        "  } else {\n" +
+        "    config.rules = keptRules;\n" +
+        "  }\n" +
+        "\n" +
+        "  return config;\n" +
+        "}"
 
 @Composable
 private fun Dmm2SkippedPrefixPanel(
@@ -2533,7 +2720,10 @@ private fun JavlibraryCookieStatusCard(
 private fun ActorAvatarUpdatePanel(
     state: com.example.localmovielibrary.data.repository.ActorAvatarUpdateState,
     gfriendsEnabled: Boolean,
-    onUpdate: () -> Unit
+    isRepairingFavorites: Boolean,
+    favoriteRepairMessage: String?,
+    onUpdate: () -> Unit,
+    onRepairFavorites: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -2548,7 +2738,7 @@ private fun ActorAvatarUpdatePanel(
             fontWeight = FontWeight.Bold
         )
         Text(
-            text = state.message ?: "全库重新匹配演员头像，不修改影片信息",
+            text = favoriteRepairMessage ?: state.message ?: "全库重新匹配演员头像，不修改影片信息",
             color = Color.White.copy(alpha = 0.62f),
             style = MaterialTheme.typography.bodySmall
         )
@@ -2561,12 +2751,12 @@ private fun ActorAvatarUpdatePanel(
             color = Color.White.copy(alpha = 0.62f),
             style = MaterialTheme.typography.bodySmall
         )
-        if (state.isUpdating) {
+        if (state.isUpdating || isRepairingFavorites) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
         Button(
             onClick = onUpdate,
-            enabled = !state.isUpdating,
+            enabled = !state.isUpdating && !isRepairingFavorites,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp)
         ) {
@@ -2580,6 +2770,26 @@ private fun ActorAvatarUpdatePanel(
                 Icon(Icons.Rounded.Image, contentDescription = null)
             }
             Text("全库重匹配演员头像", modifier = Modifier.padding(start = 8.dp))
+        }
+        Button(
+            onClick = onRepairFavorites,
+            enabled = !state.isUpdating && !isRepairingFavorites,
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            if (isRepairingFavorites) {
+                CircularProgressIndicator(
+                    modifier = Modifier.padding(end = 8.dp).heightIn(max = 18.dp),
+                    strokeWidth = 2.dp,
+                    color = Color.White
+                )
+            } else {
+                Icon(Icons.Rounded.Favorite, contentDescription = null)
+            }
+            Text(
+                if (isRepairingFavorites) "正在修复收藏影片" else "修复收藏影片资料",
+                modifier = Modifier.padding(start = 8.dp)
+            )
         }
     }
 }

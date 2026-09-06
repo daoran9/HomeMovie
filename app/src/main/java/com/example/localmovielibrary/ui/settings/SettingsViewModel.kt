@@ -20,11 +20,14 @@ import com.example.localmovielibrary.data.repository.MovieRepository
 import com.example.localmovielibrary.data.repository.StrmScrapeRepository
 import com.example.localmovielibrary.data.repository.ActorAvatarUpdateState
 import com.example.localmovielibrary.scraper.ScrapeSource
+import com.example.localmovielibrary.scraper.SourceProbeResult
+import com.example.localmovielibrary.scraper.SourceProbeStatus
 import com.example.localmovielibrary.subtitle.SubtitleSearchProvider
 import com.example.localmovielibrary.translate.TranslateProvider
 import com.example.localmovielibrary.translate.DeepSeekPromptTemplate
 import com.example.localmovielibrary.translate.DeepSeekPromptTemplates
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -668,7 +671,7 @@ class SettingsViewModel(
      * 2) 交给仓库后台任务，避免阻塞设置页。
      */
     fun updateMissingActorAvatars() {
-        if (actorAvatarUpdateState.value.isUpdating) return
+        if (actorAvatarUpdateState.value.isUpdating || uiState.value.isRepairingFavoriteMetadata) return
         viewModelScope.launch {
             _uiState.update { it.copy(savedMessage = "正在读取影片演员列表...") }
             runCatching { movieRepository.getMoviesForActorAvatarUpdate() }
@@ -696,6 +699,78 @@ class SettingsViewModel(
         }
     }
 
+    /*
+     * ================================================================================
+     * 步骤2：修复收藏影片资料
+     * ================================================================================
+     * 目标：只重新刮削收藏影片，补齐演员、简介和头像等 NFO 字段。
+     * 数据源：Room 收藏轻量记录和 DMM/FANZA 优先重新刮削链。
+     * 操作：
+     * 1) 只读取 isFavorite=1 的影片，不影响非收藏内容。
+     * 2) 每部影片完成后刷新库记录，单片失败继续处理下一部。
+     */
+    fun repairFavoriteMovieMetadata() {
+        if (actorAvatarUpdateState.value.isUpdating || uiState.value.isRepairingFavoriteMetadata) return
+        viewModelScope.launch {
+            Log.i("SettingsViewModel", "开始修复收藏影片资料")
+            _uiState.update {
+                it.copy(
+                    isRepairingFavoriteMetadata = true,
+                    favoriteMetadataRepairMessage = "正在读取收藏影片...",
+                    savedMessage = "正在读取收藏影片..."
+                )
+            }
+            try {
+                // 2.1 读取收藏范围并为每部影片更新可见进度。
+                val movies = movieRepository.getFavoriteMoviesForMetadataRepair()
+                if (movies.isEmpty()) {
+                    _uiState.update {
+                        it.copy(
+                            favoriteMetadataRepairMessage = "没有可修复的收藏影片",
+                            savedMessage = "没有可修复的收藏影片"
+                        )
+                    }
+                    return@launch
+                }
+
+                var repaired = 0
+                var failed = 0
+                movies.forEachIndexed { index, movie ->
+                    _uiState.update {
+                        it.copy(favoriteMetadataRepairMessage = "正在修复收藏影片：${index + 1}/${movies.size}")
+                    }
+                    // 2.2 自动优先链会把完整资料写回原 NFO。
+                    try {
+                        scrapeRepository.rescrapeMovie(movie, ScrapeSource.Dmm2, automaticPriority = true)
+                        movieRepository.refreshMovieRecoveringMovedStrm(movie.id)
+                            ?: error("收藏影片刷新失败：${movie.videoName}")
+                        repaired += 1
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        failed += 1
+                        Log.w("SettingsViewModel", "收藏影片资料修复失败：${movie.videoName}", error)
+                    }
+                }
+
+                val result = "收藏资料修复完成：$repaired/${movies.size}${if (failed > 0) "，失败 $failed" else ""}"
+                _uiState.update {
+                    it.copy(favoriteMetadataRepairMessage = result, savedMessage = result)
+                }
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                val message = error.message ?: "读取收藏影片失败"
+                _uiState.update {
+                    it.copy(favoriteMetadataRepairMessage = message, savedMessage = message)
+                }
+            } finally {
+                _uiState.update { it.copy(isRepairingFavoriteMetadata = false) }
+                Log.i("SettingsViewModel", "收藏影片资料修复结束")
+            }
+        }
+    }
+
     fun rebuildCloudStrmIndex() {
         _uiState.update { it.copy(isRebuildingStrmIndex = true, savedMessage = null) }
         viewModelScope.launch {
@@ -713,6 +788,66 @@ class SettingsViewModel(
 
     fun clearMessage() {
         _uiState.update { it.copy(savedMessage = null) }
+    }
+
+    /*
+     * ================================================================================
+     * 步骤1：测试 DMM/FANZA 或 JavDB 当前网络
+     * ================================================================================
+     * 目标：让用户确认代理软件的分流规则是否生效，不替用户切换 VPN。
+     * 数据源：StrmScrapeRepository 的来源连通性探测结果。
+     * 操作：
+     * 1) 同时只运行一个来源测试，避免把两个按钮的结果混在一起。
+     * 2) 把地区限制、出口封禁、CF 验证和普通网络失败转换成可读提示。
+     */
+    fun testScrapeSource(source: ScrapeSource) {
+        if (source !in setOf(ScrapeSource.Dmm, ScrapeSource.Dmm2, ScrapeSource.Javdb)) return
+        if (_uiState.value.testingScrapeSource != null) return
+        _uiState.update {
+            it.copy(
+                testingScrapeSource = source,
+                savedMessage = null
+            )
+        }
+        viewModelScope.launch {
+            Log.i(TAG, "来源连通性测试开始：${source.name}")
+            runCatching { scrapeRepository.probeScrapeSource(source) }
+                .onSuccess { result ->
+                    val message = formatSourceProbeMessage(source, result)
+                    _uiState.update { state ->
+                        state.copy(
+                            testingScrapeSource = null,
+                            dmmProbeMessage = if (source == ScrapeSource.Dmm || source == ScrapeSource.Dmm2) message else state.dmmProbeMessage,
+                            javdbProbeMessage = if (source == ScrapeSource.Javdb) message else state.javdbProbeMessage,
+                            savedMessage = message
+                        )
+                    }
+                    Log.i(TAG, "来源连通性测试结束：${source.name}，$message")
+                }
+                .onFailure { error ->
+                    val message = "测试失败：${error.message ?: error::class.java.simpleName}"
+                    _uiState.update { state ->
+                        state.copy(
+                            testingScrapeSource = null,
+                            dmmProbeMessage = if (source == ScrapeSource.Dmm || source == ScrapeSource.Dmm2) message else state.dmmProbeMessage,
+                            javdbProbeMessage = if (source == ScrapeSource.Javdb) message else state.javdbProbeMessage,
+                            savedMessage = message
+                        )
+                    }
+                    Log.i(TAG, "来源连通性测试结束：${source.name}，$message")
+                }
+        }
+    }
+
+    private fun formatSourceProbeMessage(source: ScrapeSource, result: SourceProbeResult): String {
+        val label = if (source == ScrapeSource.Javdb) "JavDB" else "DMM/FANZA"
+        return when (result.status) {
+            SourceProbeStatus.Reachable -> "$label 当前网络可访问"
+            SourceProbeStatus.RegionBlocked -> "$label 被地区限制，请检查出口节点"
+            SourceProbeStatus.AccessBanned -> "$label 当前出口已被站点封禁，请更换节点"
+            SourceProbeStatus.CloudflareChallenge -> "$label 需要 CF 验证，请先在浏览器完成验证"
+            SourceProbeStatus.NetworkError -> "$label 网络失败${result.detail.takeIf { it.isNotBlank() }?.let { "：$it" }.orEmpty()}"
+        }
     }
 
     private fun loadState(): SettingsUiState =
@@ -853,7 +988,12 @@ data class SettingsUiState(
     val isReorganizing: Boolean = false,
     val isRebuildingStrmIndex: Boolean = false,
     val isScraping: Boolean = false,
+    val isRepairingFavoriteMetadata: Boolean = false,
+    val favoriteMetadataRepairMessage: String? = null,
     val scrapeLog: String = "",
+    val testingScrapeSource: ScrapeSource? = null,
+    val dmmProbeMessage: String? = null,
+    val javdbProbeMessage: String? = null,
     val savedMessage: String? = null
 ) {
     val hasMissavCookie: Boolean

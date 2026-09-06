@@ -26,6 +26,7 @@ import com.example.localmovielibrary.scraper.ScrapeLogStore
 import com.example.localmovielibrary.scraper.ScrapeRunResult
 import com.example.localmovielibrary.scraper.ScrapeSource
 import com.example.localmovielibrary.scraper.ScrapedMovieInfo
+import com.example.localmovielibrary.scraper.SourceProbeResult
 import com.example.localmovielibrary.scraper.actorNameParts
 import com.example.localmovielibrary.scraper.actorNameVariants
 import com.example.localmovielibrary.scraper.actorNamesHaveExactVariant
@@ -69,7 +70,11 @@ class StrmScrapeRepository(
     private val logStore: ScrapeLogStore = ScrapeLogStore(context),
     private val httpClient: OkHttpClient = OkHttpClient(),
     private val networkProbe: NetworkProbe = NetworkProbe(ioDispatcher = ioDispatcher),
-    private val dmmScraper: DmmScraper = DmmScraper(client = httpClient, ioDispatcher = ioDispatcher),
+    private val dmmScraper: DmmScraper = DmmScraper(
+        client = httpClient,
+        ioDispatcher = ioDispatcher,
+        logger = logStore::append
+    ),
     private val dmm2Scraper: Dmm2Scraper = Dmm2Scraper(client = httpClient, ioDispatcher = ioDispatcher, logger = logStore::append),
     private val officialScraper: OfficialScraper = OfficialScraper(client = httpClient, ioDispatcher = ioDispatcher),
     private val javbusScraper: JavbusScraper = JavbusScraper(client = httpClient, ioDispatcher = ioDispatcher),
@@ -256,6 +261,20 @@ class StrmScrapeRepository(
         }
         logStore.append("Google connectivity ${if (reachable) "passed" else "failed"}, elapsed=${elapsedMs}ms")
         reachable
+    }
+
+    /*
+     * ================================================================================
+     * 步骤2：提供来源连通性测试
+     * ================================================================================
+     * 目标：设置页复用实际刮削使用的网络环境测试 DMM/FANZA 与 JavDB。
+     * 数据源：共享 HTTP 客户端和 NetworkProbe 的来源响应分类。
+     * 操作：
+     * 1) 只允许测试 DMM2/DMM/JavDB 三个官方或独立来源。
+     * 2) 不修改代理、不写入 Cookie，只返回当前网络结果。
+     */
+    suspend fun probeScrapeSource(source: ScrapeSource): SourceProbeResult = withContext(ioDispatcher) {
+        networkProbe.probeSource(source)
     }
 
     suspend fun scrapeMovie(
