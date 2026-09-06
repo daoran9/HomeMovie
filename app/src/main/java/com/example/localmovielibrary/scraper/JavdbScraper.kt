@@ -1,6 +1,7 @@
 package com.example.localmovielibrary.scraper
 
 import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -16,7 +17,7 @@ class JavdbScraper(
     private val cookieProvider: () -> String = { "" },
     private val logger: ((String) -> Unit)? = null,
     private val webViewFetcher: JavlibraryWebViewFetcher? = null
-) : MovieScraper {
+) : MovieScraper, ReviewActorFallback {
     override val source: ScrapeSource = ScrapeSource.Javdb
 
     /** 只读取对应 JavDB 影片的演员名，用于跨源回查 DMM/FANZA 官方头像。 */
@@ -31,8 +32,10 @@ class JavdbScraper(
             logger?.invoke("JavDB 演员别名查询未找到详情：$normalized")
             return@withContext emptyList()
         }
-        val actors = parseActors(fetch(detailUrl))
-            .map { actor -> ActorAliasLookup(name = actor.name) }
+        val detailHtml = fetch(detailUrl)
+        val (resolvedActors, aliases) = resolveActorProfiles(parseActors(detailHtml))
+        val actors = resolvedActors
+            .map { actor -> ActorAliasLookup(name = actor.name, aliases = aliases[actor.name].orEmpty()) }
             .distinctBy { actor -> actor.name }
         logger?.invoke("JavDB 演员别名查询完成：$normalized，${actors.size} 人")
         actors
@@ -58,12 +61,20 @@ class JavdbScraper(
             ?: error("JavDB 没有搜索到详情页：$normalized")
         logger?.invoke("JavDB 找到详情页：$detailUrl")
         val detailHtml = fetch(detailUrl)
-        parseDetail(normalized, detailUrl, detailHtml)
+        val (actors, actorAliases) = resolveActorProfiles(parseActors(detailHtml))
+        parseDetail(normalized, detailUrl, detailHtml, actors, actorAliases)
     }
 
     private fun buildSearchUrl(number: String): String =
         "https://javdb.com/search".toHttpUrl().newBuilder()
             .addQueryParameter("q", number)
+            .build()
+            .toString()
+
+    private fun buildActorSearchUrl(actorName: String): String =
+        "https://javdb.com/search".toHttpUrl().newBuilder()
+            .addQueryParameter("f", "actor")
+            .addQueryParameter("q", actorName)
             .build()
             .toString()
 
@@ -87,7 +98,13 @@ class JavdbScraper(
             ?.second
     }
 
-    internal fun parseDetail(number: String, url: String, html: String): ScrapedMovieInfo {
+    internal fun parseDetail(
+        number: String,
+        url: String,
+        html: String,
+        resolvedActors: List<JavdbActor>? = null,
+        resolvedActorAliases: Map<String, List<String>> = emptyMap()
+    ): ScrapedMovieInfo {
         val detailNumber = parseDetailNumber(html)
         if (detailNumber.isNotBlank() && !containsExactCatalogNumber(detailNumber, normalizeNumber(number))) {
             error("JavDB 详情页番号不匹配：请求 ${normalizeNumber(number)}，页面 $detailNumber")
@@ -110,7 +127,7 @@ class JavdbScraper(
             ?.let(::absoluteUrl)
             .orEmpty()
         val parsedActors = parseActorEntries(html)
-        val actors = parsedActors
+        val actors = resolvedActors ?: parsedActors
             .filterNot { actor -> actor.gender == JavdbActorGender.Male }
         val excludedActorNames = parsedActors
             .filter { actor -> actor.gender == JavdbActorGender.Male }
@@ -134,6 +151,7 @@ class JavdbScraper(
             studio = parseLinksNearLabel(html, "片商").firstOrNull().orEmpty(),
             directors = parseLinksNearLabel(html, "导演", "導演"),
             actors = actors.map { it.name },
+            actorAliases = resolvedActorAliases,
             excludedActorNames = excludedActorNames,
             actorImageUrls = actorImageUrls,
             genres = genres,
@@ -147,6 +165,193 @@ class JavdbScraper(
 
     internal fun parseActors(html: String): List<JavdbActor> = parseActorEntries(html)
         .filterNot { actor -> actor.gender == JavdbActorGender.Male }
+
+    /*
+     * ================================================================================
+     * 步骤4：用 JavDB 短评中的姓名清单补演员
+     * ================================================================================
+     * 目标：供多源融合层在所有结构化来源都缺演员时读取用户整理的姓名清单。
+     * 数据源：详情页短评接口；只接受带换行的纯姓名列表或明确“演员：”标记的列表。
+     * 操作：
+     * 1) 重新定位严格匹配的详情页，再读取对应短评接口。
+     * 2) 调用方负责确认 DMM/FANZA、JavLibrary、JavBus、JavDB 均无演员。
+     * 3) 评论正文必须整体符合姓名列表格式，普通评价文字不会进入演员字段。
+     */
+    override suspend fun findReviewActorNames(number: String): List<String> = withContext(ioDispatcher) {
+        val normalized = normalizeNumber(number)
+        val detailUrl = findDetailUrl(fetch(buildSearchUrl(normalized)), normalized)
+            ?: return@withContext emptyList()
+        logger?.invoke("JavDB 开始读取短评姓名清单：$detailUrl")
+        val reviewUrl = detailUrl.substringBefore('?').trimEnd('/') + "/reviews/lastest"
+        val names = try {
+            val candidates = parseReviewActorNames(fetch(reviewUrl))
+            verifyReviewActorNames(candidates)
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logger?.invoke("JavDB 短评演员补充失败：$detailUrl，${error.message ?: error::class.java.simpleName}")
+            emptyList()
+        }
+        logger?.invoke("JavDB 短评演员补充结束：$detailUrl，${names.size} 人")
+        names
+    }
+
+    /*
+     * ================================================================================
+     * 步骤5：核对短评演员候选
+     * ================================================================================
+     * 目标：只保留 JavDB 演员搜索可确认的姓名，避免普通评论短句写入演员字段。
+     * 数据源：短评姓名候选和 JavDB 演员搜索结果。
+     * 操作：
+     * 1) 每个候选使用演员筛选搜索，不接受影片标题或普通文本命中。
+     * 2) 只保留演员卡片标题与候选姓名完全对应的结果。
+     * 3) 单个候选查询失败时丢弃该候选，不影响其余姓名。
+     */
+    private suspend fun verifyReviewActorNames(candidates: List<String>): List<String> {
+        if (candidates.isEmpty()) return emptyList()
+        logger?.invoke("JavDB 短评演员候选核对开始：${candidates.size} 人")
+        val verified = candidates.filter { actorName ->
+            val searchHtml = try {
+                fetch(buildActorSearchUrl(actorName))
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logger?.invoke(
+                    "JavDB 短评演员候选查询失败：$actorName，" +
+                        (error.message ?: error::class.java.simpleName)
+                )
+                null
+            }
+            searchHtml?.let { hasExactActorSearchResult(it, actorName) } == true
+        }
+        logger?.invoke("JavDB 短评演员候选核对结束：${verified.size}/${candidates.size} 人")
+        return verified
+    }
+
+    internal fun hasExactActorSearchResult(html: String, actorName: String): Boolean {
+        val actorCard = Regex(
+            """<a\b[^>]+href=[\"'][^\"']*/actors/[^\"']+[\"'][^>]*>""",
+            RegexOption.IGNORE_CASE
+        )
+        return actorCard.findAll(html).any { match ->
+            val resultName = attributeValue(match.value, "title")
+            resultName.isNotBlank() && actorNamesHaveExactVariant(resultName, actorName)
+        }
+    }
+
+    /*
+     * ================================================================================
+     * 步骤6：读取 JavDB 演员主页别名
+     * ================================================================================
+     * 目标：按演员主页归并艺名，并只保留主页真实展示的头像地址。
+     * 数据源：影片演员链接和对应演员主页的主名、别名区。
+     * 操作：
+     * 1) 只处理人数较少的影片，限制批量修复的网络请求量。
+     * 2) 主页请求失败时保留影片页姓名和原候选，不影响当前影片刮削。
+     * 3) 主页显示未知头像或没有头像时清空猜测地址，交给其它头像源继续补齐。
+     * 4) 去掉当前显示名后，把其余名字作为显式 alias 交给多源融合。
+     */
+    private suspend fun resolveActorProfiles(
+        actors: List<JavdbActor>
+    ): Pair<List<JavdbActor>, Map<String, List<String>>> {
+        if (actors.isEmpty() || actors.size > ACTOR_PROFILE_ALIAS_LIMIT) return actors to emptyMap()
+        logger?.invoke("JavDB 演员主页证据查询开始：${actors.size} 人")
+        val aliases = mutableMapOf<String, List<String>>()
+        val resolvedActors = actors.map { actor ->
+            if (actor.profileUrl.isBlank()) return@map actor
+            val profileHtml = try {
+                fetch(actor.profileUrl)
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                logger?.invoke("JavDB 演员主页别名读取失败：${actor.name}，${error.message ?: error::class.java.simpleName}")
+                null
+            }
+            if (profileHtml == null) return@map actor
+            val profileNames = parseActorProfileNames(profileHtml)
+            val actorAliases = profileNames
+                .filter { name -> !actorNamesHaveExactVariant(name, actor.name) }
+                .distinctBy { name -> name.lowercase(Locale.ROOT) }
+            if (actorAliases.isNotEmpty()) aliases[actor.name] = actorAliases
+            actor.copy(imageUrl = parseActorProfileImageUrl(profileHtml))
+        }
+        logger?.invoke("JavDB 演员主页证据查询结束：${resolvedActors.size} 人")
+        return resolvedActors to aliases
+    }
+
+    internal fun parseActorProfileNames(html: String): List<String> {
+        val titleNames = Regex(
+            """<span\b[^>]+class=[\"'][^\"']*\bactor-section-name\b[^\"']*[\"'][^>]*>([\s\S]*?)</span>""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.groupValues?.getOrNull(1).orEmpty()
+        val aliasNames = Regex(
+            """<span\b[^>]+class=[\"'][^\"']*\bsection-meta\b[^\"']*[\"'][^>]*>([\s\S]*?)</span>""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.groupValues?.getOrNull(1).orEmpty()
+        return listOf(titleNames, aliasNames)
+            .flatMap { value -> cleanHtml(value).split(Regex("""[,，、/／|;；]+""")) }
+            .map { name -> name.trim() }
+            .filter { name -> name.isNotBlank() && REVIEW_ACTOR_NAME.matches(name) }
+            .distinctBy { name -> name.lowercase(Locale.ROOT) }
+    }
+
+    internal fun parseActorProfileImageUrl(html: String): String {
+        val rawUrl = Regex(
+            """\bactor-avatar\b[\s\S]{0,500}?background-image\s*:\s*url\(([^)]+)\)""",
+            RegexOption.IGNORE_CASE
+        ).find(html)?.groupValues?.getOrNull(1)
+            ?.trim()
+            ?.trim('\'', '"')
+            .orEmpty()
+        if (rawUrl.isBlank() || rawUrl.contains("actor_unknow", ignoreCase = true)) return ""
+        return absoluteUrl(rawUrl)
+    }
+
+    internal fun parseReviewActorNames(html: String): List<String> {
+        val contentPattern = Regex(
+            """<div\b[^>]+class=[\"'][^\"']*\bcontent\b[^\"']*[\"'][^>]*>([\s\S]*?)</div>""",
+            RegexOption.IGNORE_CASE
+        )
+        return contentPattern.findAll(html)
+            .flatMap { match -> actorNameListFromReview(match.groupValues[1]).asSequence() }
+            .distinctBy { name -> name.lowercase(Locale.ROOT) }
+            .toList()
+    }
+
+    private fun actorNameListFromReview(contentHtml: String): List<String> {
+        val hasLineBreaks = REVIEW_LINE_BREAK.containsMatchIn(contentHtml)
+        val plainText = cleanReviewText(contentHtml)
+        val labelMatch = REVIEW_ACTOR_LABEL.find(plainText)
+        if (!hasLineBreaks && labelMatch == null) return emptyList()
+
+        val listText = labelMatch?.groupValues?.getOrNull(1).orEmpty().ifBlank { plainText }
+        val names = listText
+            .split(REVIEW_ACTOR_SEPARATOR)
+            .map { name -> name.trim() }
+            .filter { name -> name.isNotBlank() }
+        val acceptedSize = if (labelMatch == null) names.size in 3..12 else names.size in 1..12
+        if (!acceptedSize || names.any { name -> !name.looksLikeReviewActorName() }) {
+            return emptyList()
+        }
+        return names
+    }
+
+    private fun cleanReviewText(value: String): String = value
+        .replace(REVIEW_LINE_BREAK, "\n")
+        .replace(Regex("""<[^>]+>"""), "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ")
+        .replace("\u00A0", " ")
+        .trim()
+
+    private fun String.looksLikeReviewActorName(): Boolean =
+        length in 2..20 &&
+            REVIEW_ACTOR_NAME.matches(this) &&
+            REVIEW_PROSE_MARKERS.none { marker -> contains(marker, ignoreCase = true) }
 
     /*
      * ================================================================================
@@ -182,7 +387,8 @@ class JavdbScraper(
                 JavdbActor(
                     name = name,
                     imageUrl = "https://c0.jdbstatic.com/avatars/$group/$slug.jpg",
-                    gender = gender
+                    gender = gender,
+                    profileUrl = href
                 )
             }
             .distinctBy { it.name }
@@ -381,7 +587,8 @@ class JavdbScraper(
     internal data class JavdbActor(
         val name: String,
         val imageUrl: String,
-        val gender: JavdbActorGender = JavdbActorGender.Unknown
+        val gender: JavdbActorGender = JavdbActorGender.Unknown,
+        val profileUrl: String = ""
     )
 
     internal enum class JavdbActorGender {
@@ -393,10 +600,22 @@ class JavdbScraper(
     companion object {
         const val USER_AGENT = "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36"
         val NON_ACTOR_CATEGORY_SLUGS = setOf("censored", "uncensored", "western")
+        private const val ACTOR_PROFILE_ALIAS_LIMIT = 12
         private const val GENDER_LOOKAHEAD_CHARS = 180
         private val GENDER_MARKER = Regex(
             """^\s*(?:<strong|<span)\b[^>]*class=[\"'][^\"']*\b(female|male)\b[^\"']*[\"'][^>]*>""",
             RegexOption.IGNORE_CASE
+        )
+        private val REVIEW_LINE_BREAK = Regex("""<br\b[^>]*>""", RegexOption.IGNORE_CASE)
+        private val REVIEW_ACTOR_LABEL = Regex(
+            """^(?:演員|演员|女優|女优|出演者)\s*[:：]\s*(.+)$""",
+            setOf(RegexOption.IGNORE_CASE, RegexOption.DOT_MATCHES_ALL)
+        )
+        private val REVIEW_ACTOR_SEPARATOR = Regex("""[\r\n、，,/／|;；]+""")
+        private val REVIEW_ACTOR_NAME = Regex("""^[\p{L}\p{M}・ー々〆ヵヶ.]+$""")
+        private val REVIEW_PROSE_MARKERS = listOf(
+            "期待", "可以", "好看", "漂亮", "姐姐", "老師", "老师", "影片", "作品", "名字",
+            "沒有", "没有", "這個", "这个", "那個", "那个", "女優", "女优", "演員", "演员"
         )
     }
 }

@@ -102,11 +102,33 @@ class Dmm2Scraper(
 
     override suspend fun scrape(number: String): ScrapedMovieInfo = withContext(ioDispatcher) {
         val normalized = normalizeNumber(number)
-        val keyword = normalizeNumberForSearch(normalized)
-        val searchJson = fetchSearchWithContent(keyword)
-        val contents = searchContents(searchJson)
-        logger?.invoke("DMM2 搜索返回：$keyword，结果 ${contents.length()} 条")
-        if (contents.length() == 0) {
+        val searchKeywords = dmmSearchKeywords(normalized)
+        var selectedKeyword: String? = null
+        var selected: JSONObject? = null
+        var selectedContents = JSONArray()
+        searchKeywords.forEach { keyword ->
+            if (selected != null) return@forEach
+            val searchJson = fetchSearchWithContent(keyword)
+            val contents = searchContents(searchJson)
+            logger?.invoke("DMM2 搜索返回：$keyword，结果 ${contents.length()} 条")
+            if (contents.length() == 0) return@forEach
+            logSearchContents(keyword, contents)
+            val candidate = selectBestSearchResult(contents, keyword)
+            val matchScore = scoreSearchItem(candidate, keyword)
+            logger?.invoke(
+                "DMM2 候选结果：keyword=$keyword, contentId=${candidate.optString("id").trim()}, " +
+                    "matchScore=$matchScore, title=${candidate.optString("title").cleanText()}"
+            )
+            if (matchScore >= EXACT_CATALOG_MATCH_SCORE) {
+                selectedKeyword = keyword
+                selected = candidate
+                selectedContents = contents
+            } else {
+                logger?.invoke("DMM2 搜索结果与番号不匹配：$keyword")
+            }
+        }
+
+        if (selected == null) {
             /*
              * ================================================================================
              * 步骤2：搜索为空时直查标准内容 ID
@@ -114,40 +136,45 @@ class Dmm2Scraper(
              * 目标：DMM/FANZA 搜索索引偶发返回空数组时，仍能读取标准内容 ID 对应的官方详情。
              * 数据源：normalizeDmmSearchKeyword 生成的标准内容 ID 和 ppvContent 详情接口。
              * 操作：
-             * 1) 只使用完整厂牌和五位序号组成的内容 ID，不改用模糊搜索结果。
+             * 1) 依次使用番号候选组成的内容 ID，不改用模糊搜索结果。
              * 2) 校验详情返回的 ID 与目标番号完全对应，避免把相似内容写入影片库。
              * 3) 直查失败后仍按原流程报告 DMM/FANZA 未命中。
              */
-            logger?.invoke("DMM2 搜索为空，尝试标准内容 ID 直查：$keyword")
-            val directInfo = try {
-                // 2.1 直查标准内容 ID，并复用详情解析逻辑保留官方演员、简介和图片。
-                val detailJson = fetchDetail(keyword)
-                val searchItem = buildDirectSearchItem(keyword, detailJson)
-                parseMovieInfo(normalized, searchItem, detailJson)
-            } catch (error: CancellationException) {
-                throw error
-            } catch (error: Exception) {
-                logger?.invoke(
-                    "DMM2 标准内容 ID 直查失败：$keyword，" +
-                        (error.message ?: error::class.java.simpleName)
-                )
-                null
+            searchKeywords.forEach { keyword ->
+                if (selected != null) return@forEach
+                logger?.invoke("DMM2 搜索为空或不匹配，尝试标准内容 ID 直查：$keyword")
+                val directInfo = try {
+                    // 2.1 直查标准内容 ID，并复用详情解析逻辑保留官方演员、简介和图片。
+                    val detailJson = fetchDetail(keyword)
+                    val searchItem = buildDirectSearchItem(keyword, detailJson)
+                    parseMovieInfo(normalized, searchItem, detailJson)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    logger?.invoke(
+                        "DMM2 标准内容 ID 直查失败：$keyword，" +
+                            (error.message ?: error::class.java.simpleName)
+                    )
+                    null
+                }
+                if (directInfo != null && directInfo.title.isNotBlank()) {
+                    logger?.invoke("DMM2 标准内容 ID 直查命中：$keyword")
+                    selected = JSONObject().put("id", keyword)
+                    selectedKeyword = keyword
+                    selectedContents = JSONArray()
+                    return@withContext directInfo
+                }
             }
-            if (directInfo != null && directInfo.title.isNotBlank()) {
-                logger?.invoke("DMM2 标准内容 ID 直查命中：$keyword")
-                return@withContext directInfo
-            }
-            logger?.invoke("DMM2 标准内容 ID 直查未命中：$keyword")
-            error("DMM2 没有搜索到结果：$normalized / $keyword")
+            logger?.invoke("DMM2 标准内容 ID 直查未命中：${searchKeywords.joinToString(", ")}")
+            error("DMM2 没有搜索到结果：$normalized / ${searchKeywords.joinToString(", ")}")
         }
-        logSearchContents(keyword, contents)
-
-        val selected = selectBestSearchResult(contents, keyword)
-        val contentId = selected.optString("id").trim()
-        val matchScore = scoreSearchItem(selected, keyword)
+        val selectedItem = selected ?: error("DMM2 没有选中详情：$normalized")
+        val keyword = selectedKeyword ?: normalizeNumberForSearch(normalized)
+        val contentId = selectedItem.optString("id").trim()
+        val matchScore = scoreSearchItem(selectedItem, keyword)
         logger?.invoke(
             "DMM2 选中结果：keyword=$keyword, contentId=$contentId, " +
-                "matchScore=$matchScore, title=${selected.optString("title").cleanText()}"
+                "matchScore=$matchScore, candidates=${selectedContents.length()}"
         )
         if (matchScore < EXACT_CATALOG_MATCH_SCORE) {
             error("DMM2 没有找到与番号完全一致的详情：$normalized")
@@ -155,7 +182,7 @@ class Dmm2Scraper(
         if (contentId.isBlank()) error("DMM2 搜索结果没有 content id")
 
         val detailJson = fetchDetail(contentId)
-        val info = parseMovieInfo(normalized, selected, detailJson)
+        val info = parseMovieInfo(normalized, selectedItem, detailJson)
         if (info.title.isBlank()) error("DMM2 没有解析到标题：$normalized")
         info
     }
@@ -556,6 +583,34 @@ internal fun normalizeDmmSearchKeyword(number: String): String {
 
 /*
  * ================================================================================
+ * 步骤3：生成 DMM/FANZA 番号搜索候选
+ * ================================================================================
+ * 目标：兼容官方内容 ID 使用三位序号、五位序号和 re 后缀的差异。
+ * 数据源：影片番号原文及其数字部分。
+ * 操作：
+ * 1) 优先保留原有五位标准关键词。
+ * 2) 再尝试输入原始位数和去前导零版本。
+ * 3) 去重后交给搜索层逐个验证。
+ */
+internal fun dmmSearchKeywords(number: String): List<String> {
+    val input = number.trim().replace("_", "-")
+    val match = Regex("""(?i)^([a-z]+)-?(\d+)$""").find(input)
+        ?: return listOf(normalizeDmmSearchKeyword(number))
+    val prefix = match.groupValues[1].lowercase(Locale.ROOT)
+    val digits = match.groupValues[2]
+    val compact = listOf(
+        prefix + digits.toInt().toString().padStart(5, '0'),
+        prefix + digits,
+        prefix + digits.trimStart('0').ifBlank { "0" }
+    )
+    return listOf(
+        "$prefix $digits",
+        "$prefix-$digits"
+    ).plus(compact).distinct()
+}
+
+/*
+ * ================================================================================
  * 步骤2：按完整番号给 DMM 内容 ID 排序
  * ================================================================================
  * 目标：优先选择相同厂牌和相同序号，避免 NAMH-022 命中 HNAMH-022。
@@ -581,6 +636,17 @@ internal fun dmmContentIdMatchScore(contentId: String, keyword: String): Int {
         normalizedContentId.endsWith(normalizedKeyword) -> 200
         normalizedKeyword in normalizedContentId -> 150
         else -> 0
+    }
+    val keywordParts = Regex("""^([a-z]+)(\d+)$""").find(normalizedKeyword)
+    val contentParts = Regex("""^(\d*)([a-z]+)(\d+)([a-z]*)$""").find(normalizedContentId)
+    if (keywordParts != null && contentParts != null) {
+        val sameLabel = keywordParts.groupValues[1] == contentParts.groupValues[2]
+        val sameNumber = keywordParts.groupValues[2].toIntOrNull() == contentParts.groupValues[3].toIntOrNull()
+        val numericPrefix = contentParts.groupValues[1]
+        val suffix = contentParts.groupValues[4]
+        if (sameLabel && sameNumber && suffix in setOf("", "re")) {
+            score = maxOf(score, if (numericPrefix.isEmpty()) 920 else 900)
+        }
     }
     listOf("tp", "tapestry", "tokuten", "goods", "set", "limited").forEach { bad ->
         if (bad in normalizedContentId) score -= 30

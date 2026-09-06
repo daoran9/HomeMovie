@@ -28,4 +28,12 @@ class JavbusScraperTest {
 
         assertEquals("https://cdn.example/a.jpg", result["演员甲"])
     }
+
+    @Test
+    fun genericMetadataDescriptionIsNotUsableAsMoviePlot() {
+        val description = "【發行日期】2015-03-05,【長度】189分鐘,(DANDY-414) 官方标题"
+
+        assert(isGenericMovieDescription(description, "DANDY-414"))
+        assertFalse(isGenericMovieDescription("真正的剧情正文", "DANDY-414"))
+    }
 }

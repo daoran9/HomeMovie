@@ -41,7 +41,10 @@ class JavbusScraper(
         val genres = parseGenres(html)
         val release = fields.firstValue("發行日期", "发行日期")
         val runtime = fields.firstValue("長度", "长度").digitsOnly()
-        val plot = metaContent(html, "description").cleanText()
+        val plot = metaContent(html, "description")
+            .cleanText()
+            .takeUnless { isGenericMovieDescription(it, number) }
+            .orEmpty()
 
         return ScrapedMovieInfo(
             number = number,

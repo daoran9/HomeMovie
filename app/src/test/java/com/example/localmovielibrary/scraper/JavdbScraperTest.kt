@@ -146,6 +146,104 @@ class JavdbScraperTest {
     }
 
     @Test
+    fun parseReviewActorNamesAcceptsOnlyPureMultilineNameLists() {
+        val html = """
+            <div class="content">
+              <p>五十嵐清華<br />芦名ほのか<br />Nia<br />白姫かんな</p>
+            </div>
+            <div class="content">
+              <p>非常喜欢这个姐姐<br />漂亮又温柔</p>
+            </div>
+        """.trimIndent()
+
+        assertEquals(
+            listOf("五十嵐清華", "芦名ほのか", "Nia", "白姫かんな"),
+            scraper.parseReviewActorNames(html)
+        )
+    }
+
+    /*
+     * ================================================================================
+     * 步骤5：验证短评演员候选边界
+     * ================================================================================
+     * 目标：普通双行评论不能成为候选，候选姓名必须由演员搜索卡片精确确认。
+     * 数据源：普通评论、明确演员标签和 JavDB 演员搜索结果片段。
+     * 操作：
+     * 1) 拒绝无标签的双行普通评论。
+     * 2) 接受明确标签中的单个姓名。
+     * 3) 拒绝影片文本和相似演员名，只接受精确演员卡片。
+     */
+    @Test
+    fun reviewActorFallbackRejectsOrdinaryCommentsAndRequiresExactActorSearchResult() {
+        val ordinaryReview = """
+            <div class="content"><p>演技自然<br />值得推荐</p></div>
+        """.trimIndent()
+        val labeledReview = """
+            <div class="content"><p>演员：五十嵐清華</p></div>
+        """.trimIndent()
+        val searchHtml = """
+            <a href="/v/not-an-actor"><strong>五十嵐清華</strong></a>
+            <a href="/actors/wrong" title="五十嵐清華子"><strong>五十嵐清華子</strong></a>
+            <a href="/actors/right" title="五十嵐清華"><strong>五十嵐清華</strong></a>
+        """.trimIndent()
+
+        assertEquals(emptyList<String>(), scraper.parseReviewActorNames(ordinaryReview))
+        assertEquals(listOf("五十嵐清華"), scraper.parseReviewActorNames(labeledReview))
+        assertEquals(true, scraper.hasExactActorSearchResult(searchHtml, "五十嵐清華"))
+        assertEquals(false, scraper.hasExactActorSearchResult(searchHtml, "芦名ほのか"))
+    }
+
+    @Test
+    fun parseDetailUsesReviewActorsWhenTheStructuredActorFieldIsEmpty() {
+        val html = """
+            <html><head><title>示例标题 - JavDB</title></head><body>
+              <strong>演員:</strong><span class="value">N/A</span>
+            </body></html>
+        """.trimIndent()
+        val reviewActors = listOf(
+            JavdbScraper.JavdbActor(name = "演员甲", imageUrl = ""),
+            JavdbScraper.JavdbActor(name = "演员乙", imageUrl = "")
+        )
+
+        val info = scraper.parseDetail(
+            number = "ABC-123",
+            url = "https://javdb.com/v/abc",
+            html = html,
+            resolvedActors = reviewActors
+        )
+
+        assertEquals(listOf("演员甲", "演员乙"), info.actors)
+        assertEquals(emptyMap<String, String>(), info.actorImageUrls)
+    }
+
+    @Test
+    fun parseActorProfileNamesReadsPrimaryNamesAndAliasesFromOneIdentity() {
+        val html = """
+            <div class="column actor-avatar">
+              <span class="avatar" style="background-image: url(https://c0.jdbstatic.com/avatars/j2/J26Dq.jpg)"></span>
+            </div>
+            <h2 class="title is-4 has-text-justified">
+              <span class="actor-section-name">星川舞, 安西天</span>
+              <br />
+              <span class="section-meta">星川まい, 椎名あかり, 中谷真白</span>
+              <span class="section-meta">255 部影片</span>
+            </h2>
+        """.trimIndent()
+
+        assertEquals(
+            listOf("星川舞", "安西天", "星川まい", "椎名あかり", "中谷真白"),
+            scraper.parseActorProfileNames(html)
+        )
+        assertEquals("https://c0.jdbstatic.com/avatars/j2/J26Dq.jpg", scraper.parseActorProfileImageUrl(html))
+        assertEquals(
+            "",
+            scraper.parseActorProfileImageUrl(
+                """<div class="actor-avatar"><span style="background-image: url(https://c0.jdbstatic.com/images/actor_unknow.jpg)"></span></div>"""
+            )
+        )
+    }
+
+    @Test
     fun parseDetailRejectsADifferentCatalogNumber() {
         val html = """
             <html><body>

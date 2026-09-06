@@ -136,7 +136,9 @@ class JavlibraryScraper(
             .ifBlank { titleTag(html) }
             .removeSuffix(" - JAVLibrary")
             .cleanText()
-        if (title.isBlank()) error("JavLibrary 没有解析到标题：$number")
+        if (title.isBlank() || title.equals("404 Not Found", ignoreCase = true)) {
+            error("JavLibrary 详情页不可用：$number")
+        }
 
         val cover = sectionImage(html, "video_jacket")
         val poster = buildPosterUrl(cover)

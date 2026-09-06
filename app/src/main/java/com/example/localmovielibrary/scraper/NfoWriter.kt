@@ -28,8 +28,10 @@ object NfoWriter {
         tag("trailer", info.trailer, normalizeText = false)
         tag("website", info.website, normalizeText = false)
         tag("source", info.source, normalizeText = false)
-        tag("thumb", info.thumbUrl, normalizeText = false)
-        tag("poster", info.posterUrl, normalizeText = false)
+        info.thumbUrl.takeIf { it.isUsableMovieImageUrl() }
+            ?.let { tag("thumb", it, normalizeText = false) }
+        info.posterUrl.takeIf { it.isUsableMovieImageUrl() }
+            ?.let { tag("poster", it, normalizeText = false) }
         info.directors.normalizedValues().forEach { tag("director", it) }
         info.genres.normalizedValues().forEach { tag("genre", it) }
         info.tags.normalizedValues().forEach { tag("tag", it) }
@@ -144,6 +146,13 @@ object NfoWriter {
         append("</")
         append(name)
         appendLine(">")
+    }
+
+    private fun String.isUsableMovieImageUrl(): Boolean {
+        val value = trim()
+        return value.isNotBlank() &&
+            !value.equals("null", ignoreCase = true) &&
+            (value.startsWith("http://") || value.startsWith("https://"))
     }
 
     private fun String.escapeXml(): String =

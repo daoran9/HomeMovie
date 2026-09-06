@@ -54,6 +54,19 @@ class Dmm2ScraperTest {
         assertTrue(dmmContentIdMatchScore("dvmm344x", "dvmm00344") < 850)
     }
 
+    @Test
+    fun dmmSearchKeywordsKeepOriginalNumberWidthForOfficialContentIds() {
+        assertEquals(listOf("cemn 003", "cemn-003", "cemn00003", "cemn003", "cemn3"), dmmSearchKeywords("CEMN-003"))
+        assertEquals(listOf("dandy 414", "dandy-414", "dandy00414", "dandy414"), dmmSearchKeywords("DANDY-414"))
+    }
+
+    @Test
+    fun dmmContentIdMatchScoreAcceptsOfficialPrefixAndReissueSuffix() {
+        assertTrue(dmmContentIdMatchScore("18cemn003", "cemn00003") >= 850)
+        assertTrue(dmmContentIdMatchScore("1dandy414re", "dandy00414") >= 850)
+        assertTrue(dmmContentIdMatchScore("1hnamh00022", "namh00022") < 850)
+    }
+
     /*
      * ================================================================================
      * 步骤1：验证 DMM/FANZA 影片空结果重试

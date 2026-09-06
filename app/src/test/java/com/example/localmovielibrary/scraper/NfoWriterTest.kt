@@ -36,6 +36,21 @@ class NfoWriterTest {
     }
 
     @Test
+    fun build_omitsLiteralNullMovieImageUrls() {
+        val nfo = NfoWriter.build(
+            ScrapedMovieInfo(
+                number = "ABC-123",
+                title = "示例影片",
+                thumbUrl = "null",
+                posterUrl = "NULL"
+            )
+        )
+
+        assertFalse(nfo.contains("<thumb>null</thumb>"))
+        assertFalse(nfo.contains("<poster>NULL</poster>"))
+    }
+
+    @Test
     fun build_removesZeroTrimmedNumberPrefixFromTitle() {
         val nfo = NfoWriter.build(
             ScrapedMovieInfo(

@@ -9,6 +9,17 @@ class JavlibraryScraperTest {
     private val scraper = JavlibraryScraper()
 
     @Test
+    fun parseDetailRejectsJavlibrary404Page() {
+        val html = """
+            <html><head><title>404 Not Found - JAVLibrary</title></head><body></body></html>
+        """.trimIndent()
+
+        assertThrows(IllegalStateException::class.java) {
+            scraper.parseDetail("MIGD-078", "https://www.javlibrary.com/cn/missing.html", html)
+        }
+    }
+
+    @Test
     fun findDetailUrlRequiresMatchingNumber() {
         val html = """
             <a href="/cn/vl_searchbyid.php?keyword=ABC-123">ABC-123</a>

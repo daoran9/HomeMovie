@@ -10,7 +10,7 @@ import org.junit.Test
 
 class MovieScraperRegistryTest {
     @Test
-    fun scrapeWithDmmPriorityStopsExternalSourcesAfterOfficialHit() = runBlocking {
+    fun scrapeWithDmmPriorityCollectsExternalActorsAfterCompleteLookingOfficialHit() = runBlocking {
         val calls = mutableListOf<ScrapeSource>()
         val registry = MovieScraperRegistry(
             listOf(
@@ -20,7 +20,9 @@ class MovieScraperRegistryTest {
                     ScrapedMovieInfo(
                         number = "ABC-123",
                         title = "官方标题",
+                        plot = "官方简介",
                         actors = listOf("官方演员"),
+                        actorImageUrls = mapOf("官方演员" to "https://images.example/dmm-actor.jpg"),
                         thumbUrl = "https://images.example/dmm-thumb.jpg",
                         source = "dmm2"
                     )
@@ -32,14 +34,20 @@ class MovieScraperRegistryTest {
                         number = "ABC-123",
                         title = "旧 DMM 标题",
                         runtime = "120",
-                        actors = listOf("旧演员"),
+                        actors = listOf("官方演员"),
+                        actorImageUrls = mapOf("官方演员" to "https://images.example/legacy-dmm-actor.jpg"),
                         source = "dmm"
                     )
                 ),
                 RecordingInfoMovieScraper(
                     ScrapeSource.Javlibrary,
                     calls,
-                    ScrapedMovieInfo(number = "ABC-123", title = "外部标题", source = "javlibrary")
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "外部标题",
+                        actors = listOf("官方演员", "官方漏记演员"),
+                        source = "javlibrary"
+                    )
                 ),
                 RecordingInfoMovieScraper(
                     ScrapeSource.Javbus,
@@ -56,10 +64,13 @@ class MovieScraperRegistryTest {
 
         val info = registry.scrapeWithDmmPriority("ABC-123")
 
-        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm), calls)
+        assertEquals(
+            listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb),
+            calls
+        )
         assertEquals("官方标题", info.title)
         assertEquals("120", info.runtime)
-        assertEquals(listOf("官方演员", "旧演员"), info.actors)
+        assertEquals(listOf("官方演员", "官方漏记演员"), info.actors)
     }
 
     @Test
@@ -93,6 +104,207 @@ class MovieScraperRegistryTest {
         assertEquals(listOf("男性演员"), info.excludedActorNames)
     }
 
+    /*
+     * ================================================================================
+     * 步骤3：验证旧 DMM 官方回退
+     * ================================================================================
+     * 目标：DMM/FANZA 未命中时，旧 DMM 命中仍必须走官方分支。
+     * 数据源：DMM2 失败结果、旧 DMM 完整资料和外部来源记录器。
+     * 操作：
+     * 1) DMM2 失败后查询旧 DMM。
+     * 2) 旧 DMM 命中后仍查询已配置的外部演员来源。
+     */
+    @Test
+    fun scrapeWithDmmPriorityTreatsLegacyDmmAsOfficialHitAfterDmm2Miss() = runBlocking {
+        val calls = mutableListOf<ScrapeSource>()
+        val registry = MovieScraperRegistry(
+            listOf(
+                RecordingInfoMovieScraper(ScrapeSource.Dmm2, calls, fail = true),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Dmm,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "MIGD-123",
+                        title = "旧 DMM 官方标题",
+                        plot = "旧 DMM 官方简介",
+                        actors = listOf("官方演员"),
+                        actorImageUrls = mapOf("官方演员" to "https://images.example/dmm-actor.jpg"),
+                        source = "dmm"
+                    )
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    calls,
+                    ScrapedMovieInfo(number = "MIGD-123", title = "外部标题")
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("MIGD-123")
+
+        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary), calls)
+        assertEquals("旧 DMM 官方标题", info.title)
+        assertEquals("dmm", info.source)
+    }
+
+    /*
+     * ================================================================================
+     * 步骤4：验证官方资料缺失时的外部补证据
+     * ================================================================================
+     * 目标：官方影片字段不被外部覆盖，但缺失简介和演员头像能够补齐。
+     * 数据源：DMM/FANZA、JavLibrary、JavBus 和 JavDB。
+     * 操作：
+     * 1) 官方结果缺少简介和头像后收集外部来源。
+     * 2) 保留官方标题，并采用 JavBus 简介与 JavLibrary 演员头像。
+     */
+    @Test
+    fun scrapeWithDmmPrioritySupplementsMissingOfficialEvidenceFromExternalSources() = runBlocking {
+        val calls = mutableListOf<ScrapeSource>()
+        val registry = MovieScraperRegistry(
+            listOf(
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Dmm2,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "官方标题",
+                        actors = listOf("官方演员"),
+                        source = "dmm2"
+                    )
+                ),
+                RecordingInfoMovieScraper(ScrapeSource.Dmm, calls, fail = true),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "外部标题",
+                        actors = listOf("官方演员"),
+                        actorImageUrls = mapOf("官方演员" to "https://images.example/javlibrary-actor.jpg")
+                    )
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javbus,
+                    calls,
+                    ScrapedMovieInfo(number = "ABC-123", title = "外部标题", plot = "外部简介")
+                ),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    calls,
+                    ScrapedMovieInfo(number = "ABC-123", title = "不应使用的 JavDB 标题")
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("ABC-123")
+
+        assertEquals(
+            listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb),
+            calls
+        )
+        assertEquals("官方标题", info.title)
+        assertEquals("外部简介", info.plot)
+        assertEquals("https://images.example/javlibrary-actor.jpg", info.actorImageUrls["官方演员"])
+    }
+
+    /*
+     * ================================================================================
+     * 步骤5：验证仅含演员名的官方标题
+     * ================================================================================
+     * 目标：DMM/FANZA 只返回演员名时，采用安全外部来源的完整标题。
+     * 数据源：DMM2 演员名标题、JavBus 完整标题和 JavDB 演员证据。
+     * 操作：
+     * 1) 用 MFCS-030 的真实返回形态构造官方结果。
+     * 2) 验证标题与原始标题均改用 JavBus，演员仍按多源证据融合。
+     */
+    @Test
+    fun scrapeWithDmmPriorityReplacesActorOnlyOfficialTitleWithSafeExternalTitle() = runBlocking {
+        val registry = MovieScraperRegistry(
+            listOf(
+                InfoMovieScraper(
+                    ScrapeSource.Dmm2,
+                    ScrapedMovieInfo(
+                        number = "MFCS-030",
+                        title = "るな",
+                        plot = "官方简介",
+                        actors = listOf("るな"),
+                        source = "dmm2"
+                    )
+                ),
+                FailingMovieScraper(ScrapeSource.Dmm),
+                FailingMovieScraper(ScrapeSource.Javlibrary),
+                InfoMovieScraper(
+                    ScrapeSource.Javbus,
+                    ScrapedMovieInfo(
+                        number = "MFCS-030",
+                        title = "MFCS-030 完整影片标题",
+                        actors = listOf("るな"),
+                        source = "javbus"
+                    )
+                ),
+                InfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    ScrapedMovieInfo(
+                        number = "MFCS-030",
+                        title = "不应使用的 JavDB 标题",
+                        actors = listOf("ちゃんるな"),
+                        actorAliases = mapOf("ちゃんるな" to listOf("はぴまる")),
+                        source = "javdb"
+                    )
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("MFCS-030")
+
+        assertEquals("MFCS-030 完整影片标题", info.title)
+        assertEquals("MFCS-030 完整影片标题", info.originalTitle)
+        assertEquals("官方简介", info.plot)
+        assertEquals(listOf("るな"), info.actors)
+        assertTrue(info.actorAliases["るな"].orEmpty().contains("ちゃんるな"))
+        assertEquals("dmm2", info.source)
+    }
+
+    @Test
+    fun scrapeWithDmmPrioritySupplementsMultiActorOfficialResults() = runBlocking {
+        val calls = mutableListOf<ScrapeSource>()
+        val registry = MovieScraperRegistry(
+            listOf(
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Dmm2,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "SDDE-404",
+                        title = "官方标题",
+                        plot = "官方简介",
+                        actors = listOf("碧しの", "椿かなり"),
+                        actorImageUrls = mapOf(
+                            "碧しの" to "https://images.example/a.jpg",
+                            "椿かなり" to "https://images.example/b.jpg"
+                        ),
+                        source = "dmm2"
+                    )
+                ),
+                RecordingInfoMovieScraper(ScrapeSource.Dmm, calls, fail = true),
+                RecordingInfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    calls,
+                    ScrapedMovieInfo(
+                        number = "SDDE-404",
+                        title = "外部标题",
+                        actors = listOf("碧しの", "椿かなり", "佳苗るか"),
+                        source = "javlibrary"
+                    )
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("SDDE-404")
+
+        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary), calls)
+        assertEquals(listOf("碧しの", "椿かなり", "佳苗るか"), info.actors)
+    }
+
     @Test
     fun scrapeWithDmmPriorityUsesJavlibraryActorsForMsajOfficialHit() = runBlocking {
         val calls = mutableListOf<ScrapeSource>()
@@ -104,6 +316,7 @@ class MovieScraperRegistryTest {
                     ScrapedMovieInfo(
                         number = "MSAJ-004",
                         title = "官方标题",
+                        plot = "官方简介",
                         actors = listOf("DMM 演员"),
                         thumbUrl = "https://images.example/dmm-thumb.jpg",
                         source = "dmm2"
@@ -128,6 +341,7 @@ class MovieScraperRegistryTest {
                         title = "JavLibrary 标题",
                         actors = listOf("JavLibrary 演员"),
                         actorAliases = mapOf("JavLibrary 演员" to listOf("JavLibrary 别名")),
+                        actorImageUrls = mapOf("JavLibrary 演员" to "https://images.example/javlibrary-actor.jpg"),
                         source = "javlibrary"
                     )
                 ),
@@ -146,7 +360,10 @@ class MovieScraperRegistryTest {
 
         val info = registry.scrapeWithDmmPriority("MSAJ-004")
 
-        assertEquals(listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary), calls)
+        assertEquals(
+            listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb),
+            calls
+        )
         assertEquals("官方标题", info.title)
         assertEquals("120", info.runtime)
         assertEquals(listOf("JavLibrary 演员"), info.actors)
@@ -205,7 +422,7 @@ class MovieScraperRegistryTest {
                 RecordingInfoMovieScraper(
                     ScrapeSource.Dmm,
                     calls,
-                    ScrapedMovieInfo(number = "ABC-123", title = "旧 DMM 不应请求", source = "dmm")
+                    fail = true
                 )
             )
         )
@@ -213,7 +430,7 @@ class MovieScraperRegistryTest {
         val info = registry.scrapeWithDmmPriority("ABC-123")
 
         assertEquals(
-            listOf(ScrapeSource.Dmm2, ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb),
+            listOf(ScrapeSource.Dmm2, ScrapeSource.Dmm, ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb),
             calls
         )
         assertEquals("JL 标题", info.title)
@@ -255,6 +472,133 @@ class MovieScraperRegistryTest {
         assertEquals(JAVDB_ACTOR_EVIDENCE_SOURCE, info.source)
         assertEquals(listOf("演员甲"), info.actors)
         assertEquals("https://c0.jdbstatic.com/avatars/ab/Ab123.jpg", info.actorImageUrls["演员甲"])
+    }
+
+    @Test
+    fun scrapeWithDmmPriorityUsesReviewActorsOnlyWhenAllStructuredSourcesAreEmpty() = runBlocking {
+        val reviewCalls = mutableListOf<String>()
+        val registry = MovieScraperRegistry(
+            listOf(
+                InfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    ScrapedMovieInfo(number = "DVMM-344", title = "标题", plot = "简介", source = "javlibrary")
+                ),
+                InfoMovieScraper(
+                    ScrapeSource.Javbus,
+                    ScrapedMovieInfo(number = "DVMM-344", title = "标题", source = "javbus")
+                ),
+                ReviewFallbackMovieScraper(
+                    structuredActors = emptyList(),
+                    reviewActors = listOf("五十嵐清華", "芦名ほのか", "Nia", "白姫かんな"),
+                    reviewCalls = reviewCalls
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("DVMM-344")
+
+        assertEquals(listOf("DVMM-344"), reviewCalls)
+        assertEquals(listOf("五十嵐清華", "芦名ほのか", "Nia", "白姫かんな"), info.actors)
+    }
+
+    @Test
+    fun scrapeWithDmmPrioritySkipsReviewActorsWhenAStructuredSourceHasActors() = runBlocking {
+        val reviewCalls = mutableListOf<String>()
+        val registry = MovieScraperRegistry(
+            listOf(
+                InfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    ScrapedMovieInfo(
+                        number = "ENKI-005",
+                        title = "标题",
+                        plot = "简介",
+                        actors = listOf("神楽アイネ"),
+                        source = "javlibrary"
+                    )
+                ),
+                ReviewFallbackMovieScraper(
+                    structuredActors = emptyList(),
+                    reviewActors = listOf("错误评论姓名", "另一个错误姓名"),
+                    reviewCalls = reviewCalls
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("ENKI-005")
+
+        assertEquals(emptyList<String>(), reviewCalls)
+        assertEquals(listOf("神楽アイネ"), info.actors)
+    }
+
+    @Test
+    fun scrapeWithDmmPriorityMergesDifferentStageNamesFromOneJavdbActorProfile() = runBlocking {
+        val sharedAvatar = "https://c0.jdbstatic.com/avatars/j2/J26Dq.jpg"
+        val registry = MovieScraperRegistry(
+            listOf(
+                InfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    ScrapedMovieInfo(
+                        number = "ICHK-029",
+                        title = "标题",
+                        actors = listOf("松宮ひすい", "星川まい"),
+                        actorAliases = mapOf("星川まい" to listOf("椎名あかり")),
+                        source = "javlibrary"
+                    )
+                ),
+                InfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    ScrapedMovieInfo(
+                        number = "ICHK-029",
+                        title = "JavDB 标题",
+                        actors = listOf("松宮ひすい", "安西天"),
+                        actorAliases = mapOf("安西天" to listOf("星川舞", "星川まい", "椎名あかり")),
+                        actorImageUrls = mapOf("安西天" to sharedAvatar),
+                        source = "javdb"
+                    )
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("ICHK-029")
+
+        assertEquals(listOf("松宮ひすい", "星川まい"), info.actors)
+        assertTrue(info.actorAliases["星川まい"].orEmpty().contains("安西天"))
+        assertEquals(sharedAvatar, info.actorImageUrls["星川まい"])
+    }
+
+    @Test
+    fun scrapeWithDmmPriorityMergesJapaneseNicknamePrefixAcrossSources() = runBlocking {
+        val avatar = "https://c0.jdbstatic.com/avatars/o2/O28eA.jpg"
+        val registry = MovieScraperRegistry(
+            listOf(
+                InfoMovieScraper(
+                    ScrapeSource.Javlibrary,
+                    ScrapedMovieInfo(
+                        number = "MFCS-030",
+                        title = "标题",
+                        actors = listOf("るな"),
+                        source = "javlibrary"
+                    )
+                ),
+                InfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    ScrapedMovieInfo(
+                        number = "MFCS-030",
+                        title = "JavDB 标题",
+                        actors = listOf("ちゃんるな"),
+                        actorAliases = mapOf("ちゃんるな" to listOf("はぴまる")),
+                        actorImageUrls = mapOf("ちゃんるな" to avatar),
+                        source = "javdb"
+                    )
+                )
+            )
+        )
+
+        val info = registry.scrapeWithDmmPriority("MFCS-030")
+
+        assertEquals(listOf("るな"), info.actors)
+        assertTrue(info.actorAliases["るな"].orEmpty().contains("ちゃんるな"))
+        assertEquals(avatar, info.actorImageUrls["るな"])
     }
 
     @Test
@@ -1072,15 +1416,25 @@ class MovieScraperRegistryTest {
     }
 
     @Test
+    fun movieNumberExtractorIgnoresTrailingCloudPickcode() {
+        assertEquals(
+            "NAMH-056",
+            MovieNumberExtractor.extract("【泉りおん】NAMH-056_bd5h3bkwkk35g83ez.strm")
+        )
+    }
+
+    @Test
     fun actorIdentityMatchingDoesNotTreatSuffixNamesAsTheSamePerson() {
         assertFalse(actorNamesHaveExactVariant("宇流木さらら", "宇流木さら"))
         assertTrue(actorNamesHaveExactVariant("宇流木さらら（宇流木さら）", "宇流木さら"))
+        assertTrue(actorNamesHaveLikelyAliasVariant("るな", "ちゃんるな"))
     }
 
     @Test
     fun actorNamePartsDropsFieldLabelAndNormalizesSimplifiedCharacters() {
         assertEquals(listOf("櫻井美優"), actorNameParts("演员:（櫻井美優）"))
         assertTrue(actorNamesHaveExactVariant("波多野结衣", "波多野結衣"))
+        assertTrue(actorNamesHaveExactVariant("新山枫", "新山楓"))
     }
 
     @Test
@@ -1228,6 +1582,26 @@ class MovieScraperRegistryTest {
         override suspend fun scrape(number: String): ScrapedMovieInfo {
             delay(delayMs)
             return ScrapedMovieInfo(number = number, title = "延迟来源")
+        }
+    }
+
+    private class ReviewFallbackMovieScraper(
+        private val structuredActors: List<String>,
+        private val reviewActors: List<String>,
+        private val reviewCalls: MutableList<String>
+    ) : MovieScraper, ReviewActorFallback {
+        override val source: ScrapeSource = ScrapeSource.Javdb
+
+        override suspend fun scrape(number: String): ScrapedMovieInfo = ScrapedMovieInfo(
+            number = number,
+            title = "JavDB 标题",
+            actors = structuredActors,
+            source = "javdb"
+        )
+
+        override suspend fun findReviewActorNames(number: String): List<String> {
+            reviewCalls += number
+            return reviewActors
         }
     }
 }

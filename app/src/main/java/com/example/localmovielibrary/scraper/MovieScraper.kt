@@ -13,6 +13,10 @@ interface MovieScraper {
     suspend fun scrape(number: String): ScrapedMovieInfo
 }
 
+interface ReviewActorFallback {
+    suspend fun findReviewActorNames(number: String): List<String>
+}
+
 class MovieScraperRegistry(
     scrapers: List<MovieScraper>,
     private val logger: ((String) -> Unit)? = null,
@@ -34,9 +38,10 @@ class MovieScraperRegistry(
      * 目标：把自动刮削拆成“官方命中”和“外部后备”两条互斥分支。
      * 数据源：DMM/FANZA、旧 DMM、JavLibrary、JavBus、JavDB 和当前番号。
      * 操作：
-     * 1) 先严格查询 DMM/FANZA；命中后只允许旧 DMM 补同一官方家族缺失字段。
-     * 2) DMM/FANZA 未命中时，完整收集 JL、JB、JavDB，再按字段职责融合。
-     * 3) 外部后备分支不查询旧 DMM，避免把非官方结果混入官方未命中分支。
+     * 1) 依次查询 DMM/FANZA 和旧 DMM；任一命中都视为官方命中。
+     * 2) 官方命中后仍收集外部演员证据，避免官方只登记部分演员。
+     * 3) 官方标题只有演员名时，用 JavBus/JavLibrary 的完整标题修正。
+     * 4) JavDB 只补演员证据，不能覆盖或补齐影片资料。
      */
     suspend fun scrapeWithDmmPriority(
         number: String,
@@ -86,13 +91,13 @@ class MovieScraperRegistry(
          * 目标：DMM/FANZA 命中后保留官方影片资料；MSAJ 演员以 JavLibrary 为准。
          * 数据源：DMM2 详情和旧 DMM 详情。
          * 操作：
-         * 1) DMM2 成功即视为严格番号命中。
-         * 2) 旧 DMM 与 DMM2 都属于官方资料，完整合并各自确认的演员、别名和头像证据。
+         * 1) DMM/FANZA 或旧 DMM 成功即视为严格番号命中。
+         * 2) 两者都属于官方资料，完整合并各自确认的演员、别名和头像证据。
          * 3) MSAJ 额外读取 JavLibrary 演员，非空时只替换演员和别名。
-         */
+        */
         val dmm2Info = collect(ScrapeSource.Dmm2)
-        if (dmm2Info != null) {
-            val dmmInfo = collect(ScrapeSource.Dmm)
+        val dmmInfo = collect(ScrapeSource.Dmm)
+        if (dmm2Info != null || dmmInfo != null) {
             // 3.1 DMM2 保持字段优先级，旧 DMM 只补全同一官方家族的缺失证据。
             var merged = mergeInfos(listOfNotNull(dmm2Info, dmmInfo))
 
@@ -113,10 +118,14 @@ class MovieScraperRegistry(
                 // 4.1 只读取 JavLibrary 演员，不进入 JavBus/JavDB 影片资料融合。
                 val javlibraryInfo = collect(ScrapeSource.Javlibrary)
                 if (javlibraryInfo?.actors?.isNotEmpty() == true) {
-                    // 4.2 影片字段继续使用官方结果，演员字段使用 JavLibrary 结果。
+                    // 4.2 影片字段继续使用官方结果，演员身份和头像证据使用 JavLibrary 结果。
+                    val actorEvidence = mergeInfos(listOf(merged, javlibraryInfo))
                     merged = merged.copy(
                         actors = javlibraryInfo.actors,
-                        actorAliases = javlibraryInfo.actorAliases
+                        actorAliases = javlibraryInfo.actorAliases,
+                        excludedActorNames = actorEvidence.excludedActorNames,
+                        actorImageUrls = actorEvidence.actorImageUrls,
+                        actorImageCandidates = actorEvidence.actorImageCandidates
                     ).canonicalizeActorIdentities()
                     logger?.invoke(
                         "MSAJ 演员已按 JavLibrary 校准：number=$number, " +
@@ -128,8 +137,79 @@ class MovieScraperRegistry(
                 logger?.invoke("MSAJ 演员校准结束：number=$number")
             }
 
+            /*
+             * ================================================================================
+             * 步骤5：补齐官方演员和缺失资料证据
+             * ================================================================================
+             * 目标：保留官方影片资料，修正仅含演员名的标题，并补齐演员身份、头像和缺失简介。
+             * 数据源：JavLibrary、JavBus 的影片字段，以及 JavDB 的演员字段。
+             * 操作：
+             * 1) 三个外部来源都要查询，不能用官方演员数量推断名单完整。
+             * 2) 官方标题仅含演员名时，标题只接受 JavBus/JavLibrary 的完整结果。
+             * 3) 影片简介只接受 JavBus/JavLibrary，已有官方简介保持不变。
+             * 4) JavDB 只参与演员、别名和演员头像融合。
+             */
+            logger?.invoke("官方演员和缺失资料补证开始：number=$number")
+            listOf(ScrapeSource.Javlibrary, ScrapeSource.Javbus, ScrapeSource.Javdb)
+                .filterNot { source -> collected.any { it.source == source } }
+                .forEach { source -> collect(source) }
+
+            val safeExternalEvidence = collected
+                .filter { it.source in SAFE_METADATA_FALLBACK_SOURCES }
+                .map { it.info }
+            val javdbActorEvidence = collected
+                .filter { it.source == ScrapeSource.Javdb }
+                .map { it.info }
+            val externalActorEvidence = safeExternalEvidence + javdbActorEvidence
+            if (externalActorEvidence.isNotEmpty()) {
+                val actorEvidence = mergeInfos(listOf(merged, mergeInfos(externalActorEvidence)))
+                val narrativeEvidence = listOf(ScrapeSource.Javbus, ScrapeSource.Javlibrary)
+                    .mapNotNull { source -> collected.firstOrNull { it.source == source }?.info }
+
+                // 5.1 只把“标题等于演员名”视为官方标题不完整，避免覆盖正常官方标题。
+                val officialTitleVariants = actorNameVariants(merged.title)
+                val knownActorVariants = buildSet {
+                    actorEvidence.actors.flatMapTo(this, ::actorNameVariants)
+                    actorEvidence.actorAliases.values.flatten().flatMapTo(this, ::actorNameVariants)
+                }
+                val officialTitleIsActorOnly = officialTitleVariants.isNotEmpty() &&
+                    officialTitleVariants.all(knownActorVariants::contains)
+
+                // 5.2 替换标题时排除同样只有演员名的外部结果。
+                val replacementTitle = if (officialTitleIsActorOnly) {
+                    narrativeEvidence.firstNotNullOfOrNull { info ->
+                        info.title.takeIf { title ->
+                            val titleVariants = actorNameVariants(title)
+                            title.isNotBlank() &&
+                                (titleVariants.isEmpty() || titleVariants.any { it !in knownActorVariants })
+                        }
+                    }
+                } else {
+                    null
+                }
+                if (replacementTitle != null) {
+                    logger?.invoke("官方标题仅为演员名，改用外部完整标题：number=$number")
+                }
+                merged = merged.copy(
+                    title = replacementTitle ?: merged.title,
+                    originalTitle = replacementTitle ?: merged.originalTitle,
+                    plot = merged.plot.ifBlank { narrativeEvidence.firstNotNullOfOrNull { it.plot.takeIf(String::isNotBlank) }.orEmpty() },
+                    outline = merged.outline.ifBlank { narrativeEvidence.firstNotNullOfOrNull { it.outline.takeIf(String::isNotBlank) }.orEmpty() },
+                    actors = actorEvidence.actors,
+                    actorAliases = actorEvidence.actorAliases,
+                    excludedActorNames = actorEvidence.excludedActorNames,
+                    actorImageUrls = actorEvidence.actorImageUrls,
+                    actorImageCandidates = actorEvidence.actorImageCandidates
+                ).canonicalizeActorIdentities()
+            }
+            merged = merged.withReviewActorsWhenStructuredSourcesMissing(
+                number = number,
+                structuredInfos = externalActorEvidence
+            )
+            logger?.invoke("官方演员和缺失资料补证结束：number=$number")
+
             logger?.invoke(
-                "DMM/FANZA 命中，停止外部来源：number=$number, " +
+                "DMM/FANZA 命中，外部证据收集完成：number=$number, " +
                     "sources=${collected.joinToString { it.source.name }}"
             )
             return merged
@@ -177,7 +257,7 @@ class MovieScraperRegistry(
                 .orEmpty()
             val safeMetadata = mergeInfos(safeMetadataResults)
             val actorEvidence = mergeInfos(safeMetadataResults + javdbActorEvidence)
-            val result = safeMetadata.copy(
+            var result = safeMetadata.copy(
                 plot = firstNonBlank(narrativeResults) { it.plot },
                 outline = firstNonBlank(narrativeResults) { it.outline },
                 actors = actorEvidence.actors,
@@ -189,6 +269,10 @@ class MovieScraperRegistry(
                 tags = mergedValues { it.tags },
                 rating = javlibraryRating
             ).canonicalizeActorIdentities()
+            result = result.withReviewActorsWhenStructuredSourcesMissing(
+                number = number,
+                structuredInfos = safeMetadataResults + javdbActorEvidence
+            )
             logger?.invoke(
                 "DMM/FANZA 未命中，完成外部后备融合：number=$number, " +
                     "sources=${collected.joinToString { it.source.name }}"
@@ -199,7 +283,7 @@ class MovieScraperRegistry(
         if (javdbActorEvidence.isNotEmpty()) {
             val actorEvidence = mergeInfos(javdbActorEvidence)
             logger?.invoke("DMM/FANZA 未命中，JavDB 仅保留演员证据：number=$number")
-            return ScrapedMovieInfo(
+            val result = ScrapedMovieInfo(
                 number = number,
                 title = "",
                 actors = actorEvidence.actors,
@@ -209,6 +293,10 @@ class MovieScraperRegistry(
                 actorImageCandidates = actorEvidence.actorImageCandidates,
                 source = JAVDB_ACTOR_EVIDENCE_SOURCE
             ).canonicalizeActorIdentities()
+            return result.withReviewActorsWhenStructuredSourcesMissing(
+                number = number,
+                structuredInfos = javdbActorEvidence
+            )
         }
 
         val detail = lastError?.message ?: lastError?.javaClass?.simpleName ?: "未知错误"
@@ -691,6 +779,42 @@ class MovieScraperRegistry(
         }
     }
 
+    /*
+     * ================================================================================
+     * 步骤6：在全部结构化来源无演员时读取短评姓名清单
+     * ================================================================================
+     * 目标：补回 DVMM 等详情页未登记女演员、但短评有明确姓名清单的影片。
+     * 数据源：DMM/FANZA、JavLibrary、JavBus、JavDB 的结构化结果和 JavDB 短评兜底。
+     * 操作：
+     * 1) 任一结构化来源已有演员就立即返回，不访问评论。
+     * 2) 只调用支持短评兜底的 JavDB 刮削器，并沿用 WebView 来源超时。
+     * 3) 短评失败保持原结果，避免评论接口影响影片资料写入。
+     */
+    private suspend fun ScrapedMovieInfo.withReviewActorsWhenStructuredSourcesMissing(
+        number: String,
+        structuredInfos: List<ScrapedMovieInfo>
+    ): ScrapedMovieInfo {
+        if (actors.isNotEmpty() || structuredInfos.any { info -> info.actors.isNotEmpty() }) return this
+        val fallback = scrapersBySource[ScrapeSource.Javdb] as? ReviewActorFallback ?: return this
+        logger?.invoke("全部结构化来源无演员，开始读取短评姓名清单：number=$number")
+        val reviewActors = try {
+            withTimeout(webViewSourceTimeoutMs.coerceAtLeast(1_000L)) {
+                fallback.findReviewActorNames(number)
+            }
+        } catch (error: TimeoutCancellationException) {
+            logger?.invoke("短评演员兜底超时：number=$number")
+            emptyList()
+        } catch (error: CancellationException) {
+            throw error
+        } catch (error: Exception) {
+            logger?.invoke("短评演员兜底失败：number=$number，${error.message ?: error::class.java.simpleName}")
+            emptyList()
+        }
+        if (reviewActors.isEmpty()) return this
+        logger?.invoke("短评演员兜底命中：number=$number，actors=${reviewActors.joinToString("/")}")
+        return withSupplementalActors(reviewActors)
+    }
+
     private fun isUsableActorImageUrl(url: String): Boolean {
         val value = url.trim()
         return value.isNotBlank() &&
@@ -748,6 +872,8 @@ internal fun actorNamesHaveLikelyAliasVariant(left: String, right: String): Bool
         rightVariants.any { rightName ->
             if (leftName == rightName) {
                 false
+            } else if (actorNamesMatchJapaneseNickname(leftName, rightName)) {
+                true
             } else {
                 val shorter: String
                 val longer: String
@@ -764,6 +890,24 @@ internal fun actorNamesHaveLikelyAliasVariant(left: String, right: String): Bool
             }
         }
     }
+}
+
+/*
+ * ================================================================================
+ * 步骤3：识别带「ちゃん」前缀的演员昵称
+ * ================================================================================
+ * 目标：在同一影片的多源演员证据中归并「るな / ちゃんるな」这类昵称。
+ * 数据源：已标准化的两个演员姓名。
+ * 操作：
+ * 1) 只移除姓名开头的固定敬称「ちゃん」。
+ * 2) 剩余姓名至少两个字符，避免把单字符短名误合并。
+ */
+private fun actorNamesMatchJapaneseNickname(left: String, right: String): Boolean {
+    fun withoutNicknamePrefix(value: String): String? = value
+        .removePrefix("ちゃん")
+        .takeIf { candidate -> candidate != value && candidate.length >= 2 }
+
+    return withoutNicknamePrefix(left) == right || withoutNicknamePrefix(right) == left
 }
 
 internal fun actorNamesHaveExactVariant(left: String, right: String): Boolean =
@@ -845,7 +989,8 @@ private val ACTOR_NAME_CHAR_VARIANTS = mapOf(
     '叶' to '葉',
     '绪' to '緒',
     '真' to '眞',
-    '结' to '結'
+    '结' to '結',
+    '枫' to '楓'
 )
 
 private val ACTOR_FIELD_LABEL_PREFIX = Regex(
@@ -911,6 +1056,24 @@ internal fun containsExactCatalogNumber(value: String, number: String): Boolean 
         """(?<![A-Z0-9])$prefix[-_\s]?$serial(?![A-Z0-9])""",
         RegexOption.IGNORE_CASE
     ).containsMatchIn(value)
+}
+
+/*
+ * ================================================================================
+ * 步骤4：过滤外部来源的元数据摘要
+ * ================================================================================
+ * 目标：不把 JavBus 页面用于 SEO 的日期/片长/番号摘要写成影片剧情。
+ * 数据源：JavBus meta description 和当前番号。
+ * 操作：
+ * 1) 识别同时包含发行日期、长度和当前番号的模板化摘要。
+ * 2) 命中时返回不可用，让官方或其它来源继续提供剧情。
+ */
+internal fun isGenericMovieDescription(value: String, number: String): Boolean {
+    val text = value.trim()
+    if (text.isBlank() || !containsExactCatalogNumber(text, number)) return false
+    val hasRelease = text.contains("发行日期") || text.contains("發行日期")
+    val hasRuntime = text.contains("长度") || text.contains("長度")
+    return hasRelease && hasRuntime
 }
 
 /**
