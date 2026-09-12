@@ -4,8 +4,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import org.jsoup.Jsoup
+import org.jsoup.nodes.Element
 
 class DmmScraper(
     private val client: OkHttpClient = OkHttpClient(),
@@ -14,14 +17,32 @@ class DmmScraper(
 ) : MovieScraper {
     override val source: ScrapeSource = ScrapeSource.Dmm
 
-    override suspend fun scrape(number: String): ScrapedMovieInfo = withContext(ioDispatcher) {
+    override suspend fun scrape(number: String): ScrapedMovieInfo = scrape(number, null)
+
+    internal suspend fun scrape(
+        number: String,
+        digitalInfo: ScrapedMovieInfo?,
+        allowDigital: Boolean = true
+    ): ScrapedMovieInfo = withContext(ioDispatcher) {
         val normalized = number.uppercase()
-        val detailUrl = search(normalized)
+        val detailUrl = search(normalized, allowDigital)
+        val contentId = dmmDigitalContentId(detailUrl)
+        if (contentId != null) {
+            // New video pages are client-rendered; their metadata comes from the existing detail API.
+            if (digitalInfo != null && dmmDigitalContentId(digitalInfo.website) == contentId &&
+                digitalInfo.number.equals(normalized, ignoreCase = true)
+            ) {
+                logger?.invoke("DMM 网页命中同一数字商品，复用 DMM2 详情：number=$normalized, contentId=$contentId")
+                return@withContext digitalInfo
+            }
+            logger?.invoke("DMM 网页数字商品转结构化详情：number=$normalized, contentId=$contentId")
+            return@withContext Dmm2Scraper(client, ioDispatcher, logger).scrapeContentId(normalized, contentId)
+        }
         val html = fetch(detailUrl)
         parseDetail(html, detailUrl, normalized)
     }
 
-    private fun search(number: String): String {
+    private fun search(number: String, allowDigital: Boolean): String {
         logger?.invoke("DMM 全部搜索开始：number=$number")
         val searchDestinations = mutableListOf<String>()
         for ((requestName, url) in dmmWebSearchRequests(number)) {
@@ -30,7 +51,7 @@ class DmmScraper(
                 destination = dmmResponseDestination(finalUrl)
                 searchDestinations += "$requestName=$destination"
             }
-            val link = selectDetailUrl(html, number)
+            val link = selectDetailUrl(html, number, allowDigital)
             if (!link.isNullOrBlank()) {
                 logger?.invoke(
                     "DMM 全部搜索命中：number=$number, request=$requestName, destination=$destination"
@@ -38,6 +59,7 @@ class DmmScraper(
                 return link
             }
         }
+        if (!allowDigital) error("DMM 数字来源已停用，未找到可用 DVD/租赁详情：$number")
         /*
          * ================================================================================
          * 步骤2：按官方商品 CID 直查
@@ -93,7 +115,7 @@ class DmmScraper(
      * 1) 提取普通视频和 DVD 详情链接，明确排除 TV Plus 和非 DMM 主机。
      * 2) 先按完整番号评分，再优先选择当前 video 商品入口。
      */
-    internal fun selectDetailUrl(html: String, number: String): String? {
+    internal fun selectDetailUrl(html: String, number: String, allowDigital: Boolean = true): String? {
         val keyword = normalizeDmmSearchKeyword(number)
         val cidPattern = Regex("""(?:cid=|[?&]id=)([^/?&"']+)""", RegexOption.IGNORE_CASE)
         return Regex(
@@ -115,54 +137,121 @@ class DmmScraper(
             }
             .mapNotNull { detailUrl ->
                 val contentId = cidPattern.find(detailUrl)?.groupValues?.getOrNull(1).orEmpty()
-                val matchScore = dmmContentIdMatchScore(contentId, keyword)
+                val matchScore = dmmWebContentIdMatchScore(contentId, keyword, detailUrl)
                 val routePriority = dmmDetailRoutePriority(detailUrl)
-                detailUrl.takeIf { matchScore >= 850 && routePriority > 0 }
+                detailUrl.takeIf { matchScore >= 850 && routePriority > 0 && (allowDigital || routePriority < 200) }
                     ?.let { Triple(it, matchScore, routePriority) }
             }
             .maxByOrNull { (_, matchScore, routePriority) -> matchScore * 10_000 + routePriority }
             ?.first
     }
 
-    private fun parseDetail(html: String, detailUrl: String, number: String): ScrapedMovieInfo {
-        val title = textByRegex(html, Regex("""<h1[^>]*(?:id=["']title["']|class=["'][^"']*(?:item|fn|bold)[^"']*["'])[^>]*>(.*?)</h1>""", RegexOption.IGNORE_CASE))
-            .ifBlank { textByRegex(html, Regex("""<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE)) }
+    internal fun parseDetail(html: String, detailUrl: String, number: String): ScrapedMovieInfo {
+        /*
+         * ================================================================================
+         * 步骤1：按详情字段标签读取对应值和商品简介
+         * ================================================================================
+         * 目标：兼容旧表格与当前 DVD 详情页，避免漏掉商品简介。
+         * 数据源：DMM 详情 HTML。
+         * 操作：1) 精确匹配表格或 dt/dd 标签；2) 从商品评论节点读取简介。
+         */
+        logger?.invoke("开始解析 DMM 详情字段：$number")
+        val document = Jsoup.parse(html, detailUrl)
+        val identityIds = dmmDirectDetailIdentityIds(html)
+        if (identityIds.isNotEmpty() && identityIds.none {
+                dmmWebContentIdMatchScore(it, normalizeDmmSearchKeyword(number), detailUrl) >= 850
+            }) error("DMM 详情身份不匹配：$number")
+        // 1.1 按精确标签读取表格或定义列表中的值节点
+        fun field(label: String): Element? {
+            val tableField = document.select("tr").firstNotNullOfOrNull { row ->
+                val cells = row.children().filter { it.tagName() in setOf("td", "th") }
+                cells.firstOrNull()?.takeIf { it.text().trim().trimEnd(':', '：') == label }
+                    ?.let { cells.getOrNull(1) }
+            }
+            return tableField ?: document.select("dl").firstNotNullOfOrNull { definitionList ->
+                definitionList.children().firstOrNull {
+                    it.tagName() == "dt" && it.text().trim().trimEnd(':', '：') == label
+                }?.nextElementSibling()?.takeIf { it.tagName() == "dd" }
+            }
+        }
+        fun text(label: String): String = field(label)?.text().orEmpty().trim().takeUnless { it == "----" }.orEmpty()
+        fun links(label: String): List<String> = field(label)?.select("a")
+            ?.map { it.text().trim() }?.filter { it.isNotBlank() }?.distinct().orEmpty()
+        // 1.1 读取任意 h1，避免依赖属性顺序和站点模板 class
+        val title = document.selectFirst("h1")?.clone()?.apply { select(".status-used").remove() }?.text()?.trim().orEmpty()
+            .ifBlank { document.selectFirst("meta[property=og:title], meta[name=og:title]")?.attr("content").orEmpty().trim() }
         if (title.isBlank()) error("DMM 详情页没有解析到标题")
-        val thumb = Regex("""<meta[^>]+property=["']og:image["'][^>]+content=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
-            .find(html)?.groupValues?.get(1)?.replace("ps.jpg", "pl.jpg").orEmpty()
-        val tags = linksNearLabel(html, "ジャンル")
+        val packageImage = document.selectFirst(".area-overview .box-package a.package-large img")?.absUrl("src").orEmpty()
+        val thumb = document.selectFirst("meta[property=og:image], meta[name=og:image]")?.absUrl("content").orEmpty()
+            .ifBlank { packageImage }
+            .replace("ps.jpg", "pl.jpg")
+        val poster = document.select("img[src]").firstOrNull {
+            it.absUrl("src") == thumb.replace("pl.jpg", "ps.jpg")
+        }?.absUrl("src") ?: packageImage.ifBlank { thumb }
+        /*
+         * ==============================================================================
+         * 步骤2：分离官方类型与相关标签
+         * ==============================================================================
+         * 目标：保留 DMM 页面两个独立字段，避免把ジャンル复制成関連タグ。
+         * 数据源：详情页的“ジャンル”和“関連タグ”节点。
+         * 操作：
+         * 1) 类型只写入 genres。
+         * 2) 相关标签只写入 tags。
+         */
+        val genres = links("ジャンル")
+        val relatedTags = links("関連タグ")
         val actors = Regex("""<(?:span|td)[^>]+(?:id=["']performer["']|id=["']fn-visibleActor["'])[\s\S]*?</(?:span|td)>""", RegexOption.IGNORE_CASE)
             .find(html)?.value
             ?.let { linksIn(it) }
             .orEmpty()
-            .ifEmpty { linksNearLabel(html, "出演者") }
+            .ifEmpty { links("出演者") }
 
-        val release = textNearLabel(html, "発売日")
-            .ifBlank { textNearLabel(html, "配信開始日") }
-            .replace("/", "-")
-        val runtime = textNearLabel(html, "収録時間").digitsOnly()
+        val release = Regex("""\d{4}[/\-]\d{2}[/\-]\d{2}""")
+            .find(text("発売日").ifBlank { text("配信開始日") })?.value.orEmpty().replace("/", "-")
+        val runtime = text("収録時間").digitsOnly()
+        // 1.2 优先读取当前 DVD 页的商品评论，保留旧页选择器作兼容
+        val plot = document.selectFirst("section.area-productcomment p.box-productcomment, section.area-comment p.box-comment")?.text().orEmpty()
+            .ifBlank { document.selectFirst("div.mg-b20.lh4 > p.mg-b20")?.text().orEmpty() }
+        val studio = text("メーカー")
+        val publisher = text("レーベル")
+        val series = links("シリーズ").firstOrNull().orEmpty()
+        val directors = links("監督")
+        val ratingText = document.selectFirst(".dcd-review__average strong, .d-review__average strong")?.text().orEmpty()
+        val rating = Regex("""^(\d+(?:\.\d+)?)\s*点?$""").matchEntire(ratingText.trim())?.groupValues?.get(1).orEmpty()
+        val trailer = document.selectFirst(".area-overview a.play-btn[href], .area-overview a.openSamplePlayer[href]")?.absUrl("href").orEmpty()
+            .ifBlank {
+                Regex("""video_url["']?\s*:\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE)
+                    .find(html)?.groupValues?.get(1)?.replace("\\/", "/").orEmpty()
+            }
+        // 1.3 记录真实响应的字段覆盖，供全库回归定位缺失链路
+        logger?.invoke(
+            "DMM 详情字段解析完成：$number, plot=${plot.length}, date=$release, runtime=$runtime, " +
+                "studio=${studio.isNotBlank()}, publisher=${publisher.isNotBlank()}, series=${series.isNotBlank()}, " +
+                "directors=${directors.size}, actors=${actors.size}, genres=${genres.size}, relatedTags=${relatedTags.size}, rating=${rating.isNotBlank()}, " +
+                "trailer=${trailer.isNotBlank()}, thumb=${thumb.isNotBlank()}, poster=${poster.isNotBlank()}"
+        )
 
         return ScrapedMovieInfo(
             number = number,
             title = title,
             originalTitle = title,
-            plot = textByRegex(html, Regex("""<div[^>]+class=["'][^"']*(?:mg-b20|clear|wrapper-detailContents)[^"']*["'][^>]*>\s*<p[^>]*>(.*?)</p>""", RegexOption.IGNORE_CASE)),
+            plot = plot,
             premiered = release,
             year = Regex("""\d{4}""").find(release)?.value.orEmpty(),
             runtime = runtime,
-            studio = linksNearLabel(html, "メーカー").firstOrNull().orEmpty(),
-            publisher = linksNearLabel(html, "レーベル").firstOrNull().orEmpty(),
-            series = linksNearLabel(html, "シリーズ").firstOrNull().orEmpty(),
-            directors = linksNearLabel(html, "監督"),
+            studio = studio,
+            publisher = publisher,
+            series = series,
+            directors = directors,
             actors = actors,
-            genres = tags,
-            tags = tags,
-            rating = textByRegex(html, Regex("""d-review__average[\s\S]*?<strong[^>]*>(.*?)</strong>""", RegexOption.IGNORE_CASE)),
-            trailer = Regex("""video_url["']?\s*:\s*["']([^"']+)["']""", RegexOption.IGNORE_CASE).find(html)?.groupValues?.get(1)?.replace("\\/", "/").orEmpty(),
+            genres = genres,
+            tags = relatedTags,
+            rating = rating,
+            trailer = trailer,
             website = detailUrl,
             source = "dmm",
             thumbUrl = thumb,
-            posterUrl = thumb
+            posterUrl = poster
         )
     }
 
@@ -180,12 +269,6 @@ class DmmScraper(
         }
     }
 
-    private fun linksNearLabel(html: String, label: String): List<String> {
-        val area = Regex("""$label[\s\S]{0,900}?(?:</tr>|</table>|</div>\s*</div>)""", RegexOption.IGNORE_CASE)
-            .find(html)?.value.orEmpty()
-        return linksIn(area)
-    }
-
     private fun linksIn(html: String): List<String> =
         Regex("""<a[^>]*>(.*?)</a>""", RegexOption.IGNORE_CASE)
             .findAll(html)
@@ -193,11 +276,6 @@ class DmmScraper(
             .filter { it.isNotBlank() }
             .distinct()
             .toList()
-
-    private fun textNearLabel(html: String, label: String): String {
-        val area = Regex("""$label[\s\S]{0,260}?(?:</tr>|</td>|</div>)""", RegexOption.IGNORE_CASE).find(html)?.value.orEmpty()
-        return cleanHtml(Regex("""</(?:td|th|div)>\s*<[^>]+>\s*([^<]+)""", RegexOption.IGNORE_CASE).find(area)?.groupValues?.getOrNull(1).orEmpty())
-    }
 
     private fun textByRegex(html: String, regex: Regex): String =
         cleanHtml(regex.find(html)?.groupValues?.getOrNull(1).orEmpty())
@@ -218,7 +296,7 @@ class DmmScraper(
             .trim()
 
     private companion object {
-        const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        const val USER_AGENT = "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
     }
 }
 
@@ -253,15 +331,30 @@ internal fun dmmDirectContentIds(number: String): List<String> {
 internal fun dmmDirectDetailUrl(contentId: String): String =
     "https://video.dmm.co.jp/av/content/?id=$contentId"
 
+internal fun dmmDigitalContentId(url: String): String? {
+    val parsed = url.toHttpUrlOrNull() ?: return null
+    return parsed.queryParameter("id")?.takeIf {
+        parsed.host == "video.dmm.co.jp" && parsed.encodedPath == "/av/content/" && it.isNotBlank()
+    }
+}
+
 internal fun dmmDetailRoutePriority(url: String): Int = runCatching {
     val parsed = url.toHttpUrl()
     when {
         parsed.host == "video.dmm.co.jp" && parsed.encodedPath == "/av/content/" -> 300
         parsed.host == "www.dmm.co.jp" && "/digital/videoa/" in parsed.encodedPath -> 200
+        parsed.host == "www.dmm.co.jp" && parsed.encodedPath.startsWith("/rental/") && "/detail/=/cid=" in url -> 90
         parsed.host == "www.dmm.co.jp" && "/detail/=/cid=" in url -> 100
         else -> 0
     }
 }.getOrDefault(0)
+
+// 租赁详情的 r 是发行版本后缀，仅在该路由下参与番号匹配。
+internal fun dmmWebContentIdMatchScore(contentId: String, keyword: String, url: String): Int =
+    dmmContentIdMatchScore(
+        if (url.toHttpUrl().encodedPath.startsWith("/rental/")) contentId.removeSuffix("r") else contentId,
+        keyword
+    )
 
 /*
  * ================================================================================

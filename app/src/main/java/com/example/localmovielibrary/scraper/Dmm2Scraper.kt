@@ -187,6 +187,22 @@ class Dmm2Scraper(
         info
     }
 
+    internal suspend fun scrapeContentId(number: String, contentId: String): ScrapedMovieInfo = withContext(ioDispatcher) {
+        // The web search supplies a concrete CID; validate both its catalog and the returned identity.
+        if (dmmContentIdMatchScore(contentId, normalizeDmmSearchKeyword(number)) < 850) {
+            error("DMM2 网页商品 CID 与番号不匹配：$number / $contentId")
+        }
+        logger?.invoke("DMM2 网页 CID 详情开始：number=$number, contentId=$contentId")
+        val detail = fetchDetail(contentId)
+        val item = buildDirectSearchItem(contentId, detail)
+        val info = parseMovieInfo(number, item, detail)
+        if (info.title.isBlank() || info.title == number.uppercase(Locale.ROOT)) {
+            error("DMM2 网页 CID 详情缺少有效标题：$contentId")
+        }
+        logger?.invoke("DMM2 网页 CID 详情完成：number=$number, contentId=$contentId")
+        info
+    }
+
     private fun buildDirectSearchItem(contentId: String, detailJson: JSONObject): JSONObject {
         val data = detailJson.optJSONObject("data") ?: error("DMM2 直查详情没有 data")
         val ppv = data.optJSONObject("ppvContent") ?: error("DMM2 直查详情没有 ppvContent")
@@ -198,7 +214,6 @@ class Dmm2Scraper(
             .put("id", returnedId)
             .put("title", ppv.optString("title"))
             .put("deliveryStartAt", ppv.optString("deliveryStartDate"))
-            .put("sampleMovie", ppv.optJSONObject("sampleMovie") ?: JSONObject())
             .put("review", data.optJSONObject("reviewSummary") ?: JSONObject())
     }
 
@@ -344,7 +359,22 @@ class Dmm2Scraper(
                 .ifBlank { searchItem.optString("deliveryStartAt") }
         )
         val runtime = dmmDurationToRuntimeMinutes(ppv.optInt("duration", 0))
-        val tags = ppv.optJSONArray("genres").namesFromObjects()
+        /*
+         * ================================================================================
+         * 步骤4：读取 DMM/FANZA 分类与相关标签
+         * ================================================================================
+         * 目标：分别保存详情页的ジャンル和関連タグ，完整保留官方标签组及独立标签。
+         * 数据源：PPVContent.genres 与 PPVContent.relatedTags(limit: 50)。
+         * 操作：
+         * 1) genres 只进入 NFO genre。
+         * 2) relatedTags 展开 ContentTagGroup.tags 和顶层 ContentTag，按官方名称去重。
+         */
+        logger?.invoke("开始解析 DMM2 分类与相关标签：number=$number, contentId=$contentId")
+        val genres = ppv.optJSONArray("genres").namesFromObjects()
+        val relatedTags = ppv.optJSONArray("relatedTags").contentTagNames()
+        logger?.invoke(
+            "DMM2 分类与相关标签解析完成：number=$number, genres=${genres.size}, relatedTags=${relatedTags.size}"
+        )
         val actors = ppv.optJSONArray("actresses").namesFromObjects()
         val actorImageUrls = ppv.optJSONArray("actresses").imageUrlsByName()
         val directors = ppv.optJSONArray("directors").namesFromObjects()
@@ -353,10 +383,12 @@ class Dmm2Scraper(
         val series = ppv.optJSONObject("series")?.optString("name").orEmpty().cleanText()
         val rating = review?.optString("average").orEmpty().cleanText()
             .ifBlank { searchItem.optJSONObject("review")?.optString("average").orEmpty().cleanText() }
-        val sampleMovie = searchItem.optJSONObject("sampleMovie")
-            ?: ppv.optJSONObject("sampleMovie")
-            ?: JSONObject()
-        val trailer = sampleMovie.optString("mp4Url").ifBlank { sampleMovie.optString("hlsUrl") }.cleanText()
+        // Detail and legacy search use different sample movie schemas.
+        val sample2D = ppv.optJSONObject("sample2DMovie")
+        val trailer = sample2D?.optString("highestMovieUrl").orEmpty().cleanText()
+            .ifBlank { sample2D?.optString("hlsMovieUrl").orEmpty().cleanText() }
+            .ifBlank { ppv.optJSONObject("sampleVRMovie")?.optString("highestMovieUrl").orEmpty().cleanText() }
+        logger?.invoke("DMM2 预告解析完成：number=$number, present=${trailer.isNotBlank()}")
         val plot = ppv.optString("description").cleanText()
             .ifBlank {
                 ppv.optJSONArray("announcements")
@@ -383,8 +415,8 @@ class Dmm2Scraper(
             directors = directors,
             actors = actors,
             actorImageUrls = actorImageUrls,
-            genres = tags,
-            tags = tags,
+            genres = genres,
+            tags = relatedTags,
             rating = rating,
             trailer = trailer,
             website = buildVideoContentUrl(contentId),
@@ -398,6 +430,22 @@ class Dmm2Scraper(
         if (this == null) return emptyList()
         return (0 until length())
             .mapNotNull { optJSONObject(it)?.optString("name")?.cleanText() }
+            .filter { it.isNotBlank() }
+            .distinct()
+    }
+
+    private fun JSONArray?.contentTagNames(): List<String> {
+        if (this == null) return emptyList()
+        return (0 until length())
+            .flatMap { index ->
+                val item = optJSONObject(index) ?: return@flatMap emptyList()
+                when (item.optString("__typename")) {
+                    "ContentTag" -> listOf(item.optString("name"))
+                    "ContentTagGroup" -> item.optJSONArray("tags").namesFromObjects()
+                    else -> emptyList()
+                }
+            }
+            .map { it.cleanText() }
             .filter { it.isNotBlank() }
             .distinct()
     }
@@ -536,11 +584,20 @@ query Test(${'$'}id: ID!) {
     isAllowForeign
     packageImage { mediumUrl largeUrl }
     sampleImages { number imageUrl largeImageUrl }
+    sample2DMovie { highestMovieUrl hlsMovieUrl }
+    sampleVRMovie { highestMovieUrl }
     maker { id name }
     label { id name }
     series { id name }
     directors { id name }
     genres { id name }
+    relatedTags(limit: 50) {
+      __typename
+      ... on ContentTagGroup {
+        tags { __typename ... on ContentTag { id name } }
+      }
+      ... on ContentTag { id name }
+    }
     actresses { id name imageUrl }
   }
   reviewSummary(contentId: ${'$'}id) {
@@ -638,14 +695,14 @@ internal fun dmmContentIdMatchScore(contentId: String, keyword: String): Int {
         else -> 0
     }
     val keywordParts = Regex("""^([a-z]+)(\d+)$""").find(normalizedKeyword)
-    val contentParts = Regex("""^(\d*)([a-z]+)(\d+)([a-z]*)$""").find(normalizedContentId)
+    val contentParts = Regex("""(?:^|[^a-z])([a-z]+)(\d+)([a-z]*)$""").find(normalizedContentId)
     if (keywordParts != null && contentParts != null) {
-        val sameLabel = keywordParts.groupValues[1] == contentParts.groupValues[2]
-        val sameNumber = keywordParts.groupValues[2].toIntOrNull() == contentParts.groupValues[3].toIntOrNull()
-        val numericPrefix = contentParts.groupValues[1]
-        val suffix = contentParts.groupValues[4]
+        val sameLabel = keywordParts.groupValues[1] == contentParts.groupValues[1]
+        val sameNumber = keywordParts.groupValues[2].toIntOrNull() == contentParts.groupValues[2].toIntOrNull()
+        val suffix = contentParts.groupValues[3]
         if (sameLabel && sameNumber && suffix in setOf("", "re")) {
-            score = maxOf(score, if (numericPrefix.isEmpty()) 920 else 900)
+            val labelStartsAtBeginning = contentParts.groups[1]?.range?.first == 0
+            score = maxOf(score, if (labelStartsAtBeginning) 920 else 900)
         }
     }
     listOf("tp", "tapestry", "tokuten", "goods", "set", "limited").forEach { bad ->
