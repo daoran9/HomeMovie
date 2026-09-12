@@ -10,7 +10,8 @@ import java.util.Locale
 
 class JavbusScraper(
     private val client: OkHttpClient = OkHttpClient(),
-    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO
+    private val ioDispatcher: CoroutineDispatcher = Dispatchers.IO,
+    private val cookieProvider: () -> String = { "" }
 ) : MovieScraper {
     override val source: ScrapeSource = ScrapeSource.Javbus
 
@@ -22,10 +23,27 @@ class JavbusScraper(
     }
 
     private fun parseDetail(number: String, url: String, html: String): ScrapedMovieInfo {
-        val title = h3Title(html).ifBlank { titleTag(html) }
+        /*
+         * ================================================================================
+         * 步骤1：确认 JavBus 详情页身份
+         * ================================================================================
+         * 目标：拒绝年龄确认、404、搜索结果和相似番号页面，避免空数据被记为成功。
+         * 数据源：最终响应 HTML、请求番号和 JavBus 详情结构。
+         * 操作：
+         * 1) 单独识别年龄确认页，提示用户更新 Cookie。
+         * 2) 要求标题精确包含当前番号，并存在详情信息区。
+         */
+        val detailTitle = h3Title(html)
+        if (html.isAgeVerificationPage()) {
+            error("JavBus 需要先在设置页完成年龄确认：$number")
+        }
+        if (!containsExactCatalogNumber(detailTitle, number) || !html.hasDetailInfoBlock()) {
+            error("JavBus 返回的不是当前影片详情页：$number")
+        }
+
+        val title = detailTitle.ifBlank { titleTag(html) }
             .removeSuffix(" - JavBus")
             .cleanText()
-        if (title.isBlank()) error("JavBus 没有解析到标题：$number")
 
         val coverUrl = absoluteUrl(
             Regex("""<a[^>]+class=["'][^"']*\bbigImage\b[^"']*["'][^>]+href=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
@@ -70,7 +88,7 @@ class JavbusScraper(
     }
 
     private fun fetch(url: String): String {
-        val request = Request.Builder()
+        val requestBuilder = Request.Builder()
             .url(url)
             .header("User-Agent", USER_AGENT)
             .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
@@ -84,8 +102,10 @@ class JavbusScraper(
             .header("Sec-Fetch-Site", "none")
             .header("Sec-Fetch-User", "?1")
             .header("Upgrade-Insecure-Requests", "1")
-            .build()
-        return client.newCall(request).execute().use { response ->
+        cookieProvider().trim().takeIf { it.isNotBlank() }?.let { cookie ->
+            requestBuilder.header("Cookie", cookie)
+        }
+        return client.newCall(requestBuilder.build()).execute().use { response ->
             if (!response.isSuccessful) error("JavBus 请求失败 HTTP ${response.code}: $url")
             val body = response.body ?: error("JavBus 响应为空：$url")
             val bytes = body.bytes()
@@ -159,6 +179,20 @@ class JavbusScraper(
             ?.getOrNull(1)
             ?.let(::cleanHtml)
             .orEmpty()
+
+    private fun String.isAgeVerificationPage(): Boolean {
+        val lower = lowercase(Locale.ROOT)
+        return "id=\"ageverify\"" in lower ||
+            "id='ageverify'" in lower ||
+            "/doc/driver-verify" in lower ||
+            "age verification javbus" in lower
+    }
+
+    private fun String.hasDetailInfoBlock(): Boolean =
+        Regex(
+            """<div\b[^>]*class=["'][^"']*\binfo\b[^"']*["'][^>]*>""",
+            RegexOption.IGNORE_CASE
+        ).containsMatchIn(this)
 
     private fun titleTag(html: String): String =
         Regex("""<title[^>]*>([\s\S]*?)</title>""", RegexOption.IGNORE_CASE)
@@ -246,13 +280,13 @@ class JavbusScraper(
         return runCatching { charsetName?.let { Charset.forName(it) } }.getOrNull() ?: Charsets.UTF_8
     }
 
-    private companion object {
-        val STAR_BOX_START = Regex(
+    companion object {
+        private val STAR_BOX_START = Regex(
             """<div\b[^>]*\bclass=["'][^"']*\bstar-box\b[^"']*["'][^>]*>""",
             RegexOption.IGNORE_CASE
         )
-        val IMAGE_TAG = Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE)
-        const val BASE_URL = "https://www.javbus.com"
-        const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
+        private val IMAGE_TAG = Regex("""<img\b[^>]*>""", RegexOption.IGNORE_CASE)
+        private const val BASE_URL = "https://www.javbus.com"
+        internal const val USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36"
     }
 }

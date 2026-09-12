@@ -228,6 +228,10 @@ class SettingsViewModel(
         _uiState.update { it.copy(javlibraryCookies = repository.getJavlibraryCookies()) }
     }
 
+    fun refreshJavbusCookieStatus() {
+        _uiState.update { it.copy(javbusCookies = repository.getJavbusCookies()) }
+    }
+
     fun updateBaseUrl(value: String) {
         _uiState.update { it.copy(strmBaseUrl = value, savedMessage = null) }
     }
@@ -517,6 +521,7 @@ class SettingsViewModel(
         repository.saveMissavCookies(state.missavCookies)
         repository.saveJavdbCookies(state.javdbCookies)
         repository.saveJavlibraryCookies(state.javlibraryCookies)
+        repository.saveJavbusCookies(state.javbusCookies)
         repository.saveStrmBaseUrl(state.strmBaseUrl)
         repository.saveDefaultScrapeSource(state.defaultScrapeSource)
         repository.saveGfriendsActorAvatarEnabled(state.gfriendsActorAvatarEnabled)
@@ -930,6 +935,7 @@ class SettingsViewModel(
             missavCookies = repository.getMissavCookies(),
             javdbCookies = repository.getJavdbCookies(),
             javlibraryCookies = repository.getJavlibraryCookies(),
+            javbusCookies = repository.getJavbusCookies(),
             strmTreeUri = repository.getStrmTreeUri(),
             strmTreeDisplayName = repository.getStrmTreeDisplayName(),
             libraryRootUri = repository.getLibraryRootUri(),
@@ -1009,6 +1015,7 @@ data class SettingsUiState(
     val missavCookies: String = "",
     val javdbCookies: String = "",
     val javlibraryCookies: String = "",
+    val javbusCookies: String = "",
     val strmTreeUri: String? = null,
     val strmTreeDisplayName: String = "尚未选择目录",
     val libraryRootUri: String? = null,
@@ -1081,6 +1088,9 @@ data class SettingsUiState(
 
     val hasJavlibraryCookie: Boolean
         get() = javlibraryCookies.isNotBlank()
+
+    val hasJavbusCookie: Boolean
+        get() = javbusCookies.isNotBlank()
 }
 
 data class MetadataRescrapeCandidate(

@@ -78,7 +78,11 @@ class StrmScrapeRepository(
     ),
     private val dmm2Scraper: Dmm2Scraper = Dmm2Scraper(client = httpClient, ioDispatcher = ioDispatcher, logger = logStore::append),
     private val officialScraper: OfficialScraper = OfficialScraper(client = httpClient, ioDispatcher = ioDispatcher),
-    private val javbusScraper: JavbusScraper = JavbusScraper(client = httpClient, ioDispatcher = ioDispatcher),
+    private val javbusScraper: JavbusScraper = JavbusScraper(
+        client = httpClient,
+        ioDispatcher = ioDispatcher,
+        cookieProvider = settingsRepository::getJavbusCookies
+    ),
     private val javlibraryWebViewFetcher: JavlibraryWebViewFetcher? = null,
     private val javdbScraper: JavdbScraper = JavdbScraper(
         client = httpClient,

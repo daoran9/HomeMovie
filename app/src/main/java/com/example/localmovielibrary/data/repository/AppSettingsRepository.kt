@@ -49,6 +49,12 @@ class AppSettingsRepository(context: Context) {
         prefs.edit().putString(KEY_JAVLIBRARY_COOKIES, value.trim()).commit()
     }
 
+    fun getJavbusCookies(): String = prefs.getString(KEY_JAVBUS_COOKIES, null).orEmpty()
+
+    fun saveJavbusCookies(value: String) {
+        prefs.edit().putString(KEY_JAVBUS_COOKIES, value.trim()).commit()
+    }
+
     fun getJavzimuCookies(): String = prefs.getString(KEY_JAVZIMU_COOKIES, null).orEmpty()
 
     fun saveJavzimuCookies(value: String) {
@@ -528,6 +534,7 @@ class AppSettingsRepository(context: Context) {
         const val KEY_MISSAV_COOKIES = "missav_cookies"
         const val KEY_JAVDB_COOKIES = "javdb_cookies"
         const val KEY_JAVLIBRARY_COOKIES = "javlibrary_cookies"
+        const val KEY_JAVBUS_COOKIES = "javbus_cookies"
         const val KEY_JAVZIMU_COOKIES = "javzimu_cookies"
         const val KEY_AVSUBTITLES_COOKIES = "avsubtitles_cookies"
         const val KEY_SUBTITLE_SEARCH_PROVIDER = "subtitle_search_provider"

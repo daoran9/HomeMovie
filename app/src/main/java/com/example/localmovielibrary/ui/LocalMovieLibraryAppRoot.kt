@@ -59,6 +59,7 @@ import com.example.localmovielibrary.ui.search.SearchViewModel
 import com.example.localmovielibrary.ui.settings.JavzimuCookieWebViewScreen
 import com.example.localmovielibrary.ui.settings.JavdbCookieWebViewScreen
 import com.example.localmovielibrary.ui.settings.JavlibraryCookieWebViewScreen
+import com.example.localmovielibrary.ui.settings.JavbusCookieWebViewScreen
 import com.example.localmovielibrary.ui.settings.SettingsScreen
 import com.example.localmovielibrary.ui.settings.SettingsViewModel
 import com.example.localmovielibrary.ui.settings.MissavCookieWebViewScreen
@@ -208,6 +209,9 @@ fun LocalMovieLibraryAppRoot(appContainer: AppContainer) {
                     val javlibraryCookieSaved by entry.savedStateHandle
                         .getStateFlow("javlibraryCookieSaved", false)
                         .collectAsState()
+                    val javbusCookieSaved by entry.savedStateHandle
+                        .getStateFlow("javbusCookieSaved", false)
+                        .collectAsState()
                     LaunchedEffect(javdbCookieSaved) {
                         if (javdbCookieSaved) {
                             entry.savedStateHandle["javdbCookieSaved"] = false
@@ -220,12 +224,19 @@ fun LocalMovieLibraryAppRoot(appContainer: AppContainer) {
                             viewModel.refreshJavlibraryCookieStatus()
                         }
                     }
+                    LaunchedEffect(javbusCookieSaved) {
+                        if (javbusCookieSaved) {
+                            entry.savedStateHandle["javbusCookieSaved"] = false
+                            viewModel.refreshJavbusCookieStatus()
+                        }
+                    }
                     SettingsScreen(
                         viewModel = viewModel,
                         onOpenScrapeLogs = { navController.navigate(Route.ScrapeLogs) },
                         onOpenMissavWeb = { navController.navigate(Route.missavCookieWeb("ADN-764")) },
                         onOpenJavdbWeb = { navController.navigate(Route.JavdbCookieWeb) },
-                        onOpenJavlibraryWeb = { navController.navigate(Route.JavlibraryCookieWeb) }
+                        onOpenJavlibraryWeb = { navController.navigate(Route.JavlibraryCookieWeb) },
+                        onOpenJavbusWeb = { navController.navigate(Route.JavbusCookieWeb) }
                     )
                 }
                 composable(Route.JavdbCookieWeb) {
@@ -248,6 +259,18 @@ fun LocalMovieLibraryAppRoot(appContainer: AppContainer) {
                             navController.previousBackStackEntry
                                 ?.savedStateHandle
                                 ?.set("javlibraryCookieSaved", true)
+                            navController.popBackStack()
+                        }
+                    )
+                }
+                composable(Route.JavbusCookieWeb) {
+                    JavbusCookieWebViewScreen(
+                        onBack = { navController.popBackStack() },
+                        onSaveCookie = { cookie ->
+                            appContainer.settingsRepository.saveJavbusCookies(cookie)
+                            navController.previousBackStackEntry
+                                ?.savedStateHandle
+                                ?.set("javbusCookieSaved", true)
                             navController.popBackStack()
                         }
                     )
@@ -542,6 +565,7 @@ private object Route {
     const val MissavCookieWeb = "missavCookieWeb/{number}"
     const val JavdbCookieWeb = "javdbCookieWeb"
     const val JavlibraryCookieWeb = "javlibraryCookieWeb"
+    const val JavbusCookieWeb = "javbusCookieWeb"
     const val JavzimuCookieWeb = "javzimuCookieWeb/{url}"
     const val Detail = "movieDetail/{movieId}"
     const val FilterResult = "filterResult/{filterType}/{filterValue}"

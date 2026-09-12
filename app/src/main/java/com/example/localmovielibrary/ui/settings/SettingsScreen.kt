@@ -116,7 +116,8 @@ fun SettingsScreen(
     onOpenScrapeLogs: () -> Unit,
     onOpenMissavWeb: () -> Unit,
     onOpenJavdbWeb: () -> Unit,
-    onOpenJavlibraryWeb: () -> Unit
+    onOpenJavlibraryWeb: () -> Unit,
+    onOpenJavbusWeb: () -> Unit
 ) {
     val uiState by viewModel.uiState.collectAsStateWithLifecycle()
     val actorAvatarUpdateState by viewModel.actorAvatarUpdateState.collectAsStateWithLifecycle()
@@ -251,6 +252,7 @@ fun SettingsScreen(
                         onTestScrapeSource = viewModel::testScrapeSource,
                         onOpenJavdbWeb = onOpenJavdbWeb,
                         onOpenJavlibraryWeb = onOpenJavlibraryWeb,
+                        onOpenJavbusWeb = onOpenJavbusWeb,
                         onOpenLogs = onOpenScrapeLogs,
                         onClearLogs = viewModel::clearScrapeLog
                     )
@@ -1068,6 +1070,7 @@ private fun ScrapeSettingsPage(
     onTestScrapeSource: (ScrapeSource) -> Unit,
     onOpenJavdbWeb: () -> Unit,
     onOpenJavlibraryWeb: () -> Unit,
+    onOpenJavbusWeb: () -> Unit,
     onOpenLogs: () -> Unit,
     onClearLogs: () -> Unit
 ) {
@@ -1092,6 +1095,10 @@ private fun ScrapeSettingsPage(
     JavlibraryCookieStatusCard(
         hasCookie = uiState.hasJavlibraryCookie,
         onOpenJavlibraryWeb = onOpenJavlibraryWeb
+    )
+    JavbusCookieStatusCard(
+        hasCookie = uiState.hasJavbusCookie,
+        onOpenJavbusWeb = onOpenJavbusWeb
     )
     ScraperProxyRoutingPanel(
         dmmProbeMessage = uiState.dmmProbeMessage,
@@ -2783,6 +2790,55 @@ private fun ActorAvatarUpdatePanel(
                 Icon(Icons.Rounded.Image, contentDescription = null)
             }
             Text("全库重匹配演员头像", modifier = Modifier.padding(start = 8.dp))
+        }
+    }
+}
+
+@Composable
+private fun JavbusCookieStatusCard(
+    hasCookie: Boolean,
+    onOpenJavbusWeb: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.075f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = if (hasCookie) Icons.Rounded.CheckCircle else Icons.Rounded.Public,
+                contentDescription = null,
+                tint = if (hasCookie) Color(0xFF7BD88F) else Color.White.copy(alpha = 0.72f)
+            )
+            Column(modifier = Modifier.padding(start = 10.dp)) {
+                Text(
+                    text = if (hasCookie) "已获取 JavBus Cookie" else "尚未获取 JavBus Cookie",
+                    color = Color.White,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(
+                    text = if (hasCookie) {
+                        "后续 JavBus 刮削会自动携带 Cookie。"
+                    } else {
+                        "JavBus 出现年龄确认时，先打开页面完成确认。"
+                    },
+                    color = Color.White.copy(alpha = 0.62f),
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
+        }
+        OutlinedButton(
+            onClick = onOpenJavbusWeb,
+            shape = RoundedCornerShape(18.dp)
+        ) {
+            Icon(Icons.Rounded.Public, contentDescription = null)
+            Text(
+                if (hasCookie) "刷新 JavBus Cookie" else "获取 JavBus Cookie",
+                modifier = Modifier.padding(start = 8.dp)
+            )
         }
     }
 }
