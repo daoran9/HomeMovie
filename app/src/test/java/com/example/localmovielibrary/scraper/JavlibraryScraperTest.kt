@@ -99,6 +99,29 @@ class JavlibraryScraperTest {
     }
 
     @Test
+    fun parseDetailReadsScoreAfterCurrentRatingControls() {
+        /*
+         * ================================================================================
+         * 步骤1：回放当前 JavLibrary 评分结构
+         * ================================================================================
+         * 目标：确认评分控件超过旧长度限制时，仍从 video_review 区域读取最终分数。
+         * 数据源：2026-09-12 保存的 MSAJ-006 当前详情页缩减 DOM。
+         * 操作：
+         * 1) 加载保留 10 档评分控件与最终 score 节点的真实结构。
+         * 2) 核对页面显示的 8.20 被写入统一评分字段。
+         */
+        val html = javaClass.getResource("/javlibrary/msaj006-review-current.html")!!.readText()
+
+        val info = scraper.parseDetail(
+            "MSAJ-006",
+            "https://www.javlibrary.com/cn/javme5anti.html",
+            html
+        )
+
+        assertEquals("8.20", info.rating)
+    }
+
+    @Test
     fun parseDetailUsesDmmPortraitImageForPoster() {
         val html = """
             <html><body>

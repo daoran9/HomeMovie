@@ -147,10 +147,15 @@ class JavlibraryScraper(
         val cast = parseActors(html)
         val actors = cast.map { actor -> actor.name }
         val genres = sectionLinks(html, "video_genres")
+        // 2.4 Limit score parsing to the review section; current pages put rating controls before the score.
         val score = Regex(
-            """<div\b[^>]+id=[\"']video_review[\"'][^>]*>[\s\S]{0,900}?<[^>]+class=[\"'][^\"']*\bscore\b[^\"']*[\"'][^>]*>([\s\S]*?)</""",
+            """<[^>]+class=[\"'][^\"']*\bscore\b[^\"']*[\"'][^>]*>([\s\S]*?)</""",
             RegexOption.IGNORE_CASE
-        ).find(html)?.groupValues?.getOrNull(1)?.let(::cleanHtml).orEmpty()
+        ).find(sectionHtml(html, "video_review"))
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.let(::cleanHtml)
+            .orEmpty()
 
         return ScrapedMovieInfo(
             number = number,
