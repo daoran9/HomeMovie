@@ -1,6 +1,9 @@
 package com.example.localmovielibrary.scraper
 
 object MovieNumberExtractor {
+    fun isUnsupportedFc2(fileName: String): Boolean =
+        Regex("""(?i)(?<![a-z0-9])FC2[-_ ]*(?:PPV[-_ ]*)?\d+""").containsMatchIn(fileName)
+
     private val numberPattern = Regex("""(?i)([a-z]{2,8})[-_\s]?(\d{2,6})""")
     private val trailingPickcodePattern = Regex("""(?i)_[a-z0-9]{17}$""")
 

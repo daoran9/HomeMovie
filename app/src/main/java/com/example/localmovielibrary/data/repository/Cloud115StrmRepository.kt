@@ -2,6 +2,7 @@
 
 import android.content.Context
 import android.net.Uri
+import android.provider.DocumentsContract
 import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.example.localmovielibrary.cloud115.Cloud115Client
@@ -139,6 +140,11 @@ class Cloud115StrmRepository(
             recordRepository.getCached(pickcode)
                 ?.takeIf { existing ->
                     existing.movieId == null &&
+                    Uri.parse(existing.strmUri).authority == targetRoot.uri.authority &&
+                    isDocumentWithinRoot(
+                        DocumentsContract.getTreeDocumentId(targetRoot.uri),
+                        DocumentsContract.getDocumentId(Uri.parse(existing.strmUri))
+                    ) &&
                     (segmentInfo == null || existing.movieNumber == segmentInfo.number) &&
                         canOpenUri(existing.strmUri)
                 }
@@ -356,3 +362,6 @@ private data class WrittenStrmFile(
     val name: String,
     val uri: String
 )
+
+internal fun isDocumentWithinRoot(rootId: String, documentId: String): Boolean =
+    documentId.startsWith("$rootId/")

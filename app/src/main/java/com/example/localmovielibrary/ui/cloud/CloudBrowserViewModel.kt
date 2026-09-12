@@ -256,6 +256,11 @@ class CloudBrowserViewModel(
                         )
                     }
                     try {
+                        if (MovieNumberExtractor.isUnsupportedFc2(candidate.name)) {
+                            skippedCount += 1
+                            scrapeRepository.appendLog("整目录入库跳过不支持的 FC2：${candidate.name}")
+                            continue
+                        }
                         if (recordRepository.isFinalizedInLibrary(
                                 pickcode = pickcode,
                                 libraryRootUri = settingsRepository.getLibraryRootUri().orEmpty()
