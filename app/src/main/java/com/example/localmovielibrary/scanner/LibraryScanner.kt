@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import androidx.documentfile.provider.DocumentFile
 import com.example.localmovielibrary.data.local.MovieEntity
+import com.example.localmovielibrary.util.movieMetadataBaseNames
 import com.example.localmovielibrary.util.movieKeyFromText
 import java.util.Locale
 
@@ -57,15 +58,23 @@ class LibraryScanner(private val context: Context) {
     ): MovieEntity {
         val videoName = video.name.orEmpty()
         val baseName = videoName.substringBeforeLast('.', videoName)
+        val metadataBaseNames = movieMetadataBaseNames(videoName)
         val nfoFile = findFirstExisting(
             filesByLowerName,
-            listOf("$baseName.nfo", "movie.nfo", "tvshow.nfo")
+            buildList {
+                add("${metadataBaseNames.first()}.nfo")
+                metadataBaseNames.drop(1).forEach { legacyBaseName ->
+                    add("$legacyBaseName.nfo")
+                }
+                add("movie.nfo")
+                add("tvshow.nfo")
+            }.distinct()
         ) ?: filesByLowerName.values.firstOrNull { it.name.orEmpty().endsWith(".nfo", ignoreCase = true) }
 
         val metadata = nfoFile?.let { NfoParser(context.contentResolver).parse(it.uri) } ?: NfoMetadata()
-        val posterFile = findImage(filesByLowerName, baseName, ImageKind.Poster)
-        val fanartFile = findImage(filesByLowerName, baseName, ImageKind.Fanart)
-        val thumbFile = findImage(filesByLowerName, baseName, ImageKind.Thumb)
+        val posterFile = findImage(filesByLowerName, metadataBaseNames, ImageKind.Poster)
+        val fanartFile = findImage(filesByLowerName, metadataBaseNames, ImageKind.Fanart)
+        val thumbFile = findImage(filesByLowerName, metadataBaseNames, ImageKind.Thumb)
         val fallbackTitle = baseName.replace('.', ' ').replace('_', ' ').trim()
         val title = metadata.title?.takeIf { it.isNotBlank() } ?: fallbackTitle
 
@@ -117,16 +126,24 @@ class LibraryScanner(private val context: Context) {
 
     private fun findImage(
         filesByLowerName: Map<String, DocumentFile>,
-        baseName: String,
+        metadataBaseNames: List<String>,
         kind: ImageKind
     ): DocumentFile? {
+        val movieBaseName = metadataBaseNames.first()
+        val legacyBaseNames = metadataBaseNames.drop(1)
         val suffixes = when (kind) {
-            ImageKind.Poster -> listOf("poster", "movie-poster", "$baseName-poster")
-            ImageKind.Fanart -> listOf("fanart", "movie-fanart", "$baseName-fanart")
-            ImageKind.Thumb -> listOf("thumb", "$baseName-thumb", "fanart", "movie-fanart", "$baseName-fanart")
+            ImageKind.Poster -> listOf("$movieBaseName-poster") +
+                legacyBaseNames.map { "$it-poster" } + listOf("poster", "movie-poster")
+            ImageKind.Fanart -> listOf("$movieBaseName-fanart") +
+                legacyBaseNames.map { "$it-fanart" } + listOf("fanart", "movie-fanart")
+            ImageKind.Thumb -> listOf(
+                "$movieBaseName-thumb",
+                "$movieBaseName-fanart"
+            ) + legacyBaseNames.flatMap { listOf("$it-thumb", "$it-fanart") } +
+                listOf("thumb", "fanart", "movie-fanart")
         }
         val extensions = listOf("jpg", "jpeg", "png", "webp")
-        val candidates = suffixes.flatMap { suffix -> extensions.map { ext -> "$suffix.$ext" } }
+        val candidates = suffixes.distinct().flatMap { suffix -> extensions.map { ext -> "$suffix.$ext" } }
         return findFirstExisting(filesByLowerName, candidates)
             ?: findFirstImageBySuffix(filesByLowerName, kind, extensions)
     }

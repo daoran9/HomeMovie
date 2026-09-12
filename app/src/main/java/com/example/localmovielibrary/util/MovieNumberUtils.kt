@@ -72,6 +72,35 @@ fun movieVersionKeyFromText(text: String): String? = extractMovieSourceIdentity(
 
 fun movieSourceKeyFromText(text: String): String? = extractMovieSourceIdentity(text)?.sourceKey
 
+fun movieMetadataBaseNames(fileName: String): List<String> {
+    val sourceBaseName = fileName.substringBeforeLast('.', fileName)
+    val match = MOVIE_NUMBER_PATTERN.findAll(sourceBaseName).lastOrNull()
+        ?: return listOf(sourceBaseName)
+    val numberEnd = match.groups[2]?.range?.last
+        ?: return listOf(sourceBaseName)
+    val movieBaseName = sourceBaseName.substring(0, numberEnd + 1)
+    return listOf(movieBaseName, sourceBaseName).distinct()
+}
+
+fun playbackSourceSuffixFromText(text: String): String {
+    val baseName = text.substringBeforeLast('.', text)
+    val match = MOVIE_NUMBER_PATTERN.findAll(baseName).lastOrNull()
+        ?: return playbackSourceSuffix(null, detectMovieVariant(text))
+    val numberEnd = match.groups[2]?.range?.last
+        ?: return playbackSourceSuffix(null, detectMovieVariant(text))
+    val sourceMarker = PLAYBACK_SOURCE_MARKER_PATTERN
+        .find(baseName.substring(numberEnd + 1))
+        ?.groupValues
+        ?.getOrNull(1)
+        ?.uppercase(Locale.ROOT)
+        ?.takeUnless { detectMovieVariant(it) != MovieVariant.Standard }
+    return playbackSourceSuffix(
+        partLabel = extractMovieNumberInfo(text)?.partLabel,
+        variant = detectMovieVariant(text),
+        sourceMarker = sourceMarker
+    )
+}
+
 fun partSortKey(label: String?): Int {
     val value = label?.uppercase(Locale.ROOT)
     return when {
@@ -86,3 +115,6 @@ fun isEmbeddedSubtitleMarkerPart(partLabel: String): Boolean =
 
 private val MOVIE_NUMBER_PATTERN =
     Regex("""(?i)\b([a-z]{2,10})[-_ ]?(\d{2,6})(?:[-_ ]([a-z]))?(?:$|[^a-z0-9])""")
+
+private val PLAYBACK_SOURCE_MARKER_PATTERN =
+    Regex("""(?i)^[._ -]+([a-z]{1,3})(?=$|[^a-z0-9])""")

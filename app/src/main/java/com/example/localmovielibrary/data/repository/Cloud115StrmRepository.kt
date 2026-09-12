@@ -10,7 +10,7 @@ import com.example.localmovielibrary.cloud115.Cloud115FileItem
 import com.example.localmovielibrary.util.MovieVariant
 import com.example.localmovielibrary.util.detectMovieVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
-import com.example.localmovielibrary.util.playbackSourceSuffix
+import com.example.localmovielibrary.util.playbackSourceSuffixFromText
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -135,6 +135,7 @@ class Cloud115StrmRepository(
 
         val segmentInfo = extractMovieNumberInfo(item.name)
         val variant = detectMovieVariant(item.name)
+        val sourceSuffix = playbackSourceSuffixFromText(item.name)
 
         if (!forceDistinct) {
             recordRepository.getCached(pickcode)
@@ -163,10 +164,9 @@ class Cloud115StrmRepository(
         if (
             segmentInfo != null &&
             !forceDistinct &&
-            (segmentInfo.partLabel != null || variant != MovieVariant.Standard)
+            sourceSuffix.isNotBlank()
         ) {
             findExistingMovieDirectoryFast(targetRoot, segmentInfo.number)?.let { movieDirectory ->
-                val sourceSuffix = playbackSourceSuffix(segmentInfo.partLabel, variant)
                 val variantFile = writeStrmFile(
                     root = movieDirectory,
                     videoName = item.name,

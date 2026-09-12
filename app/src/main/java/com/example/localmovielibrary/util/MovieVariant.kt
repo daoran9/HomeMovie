@@ -27,9 +27,16 @@ fun displayNumberWithVariant(number: String, sourceText: String): String {
     return cleanNumber + variant.suffix
 }
 
-fun playbackSourceSuffix(partLabel: String?, variant: MovieVariant): String {
+fun playbackSourceSuffix(
+    partLabel: String?,
+    variant: MovieVariant,
+    sourceMarker: String? = null
+): String {
     val tokens = buildList {
-        partLabel?.takeIf { it.isNotBlank() }?.let { add(it) }
+        sourceMarker?.takeIf { it.isNotBlank() }?.let { add(it) }
+        partLabel
+            ?.takeIf { it.isNotBlank() && !it.equals(sourceMarker, ignoreCase = true) }
+            ?.let { add(it) }
         variant.displayName
             .takeIf { it.isNotBlank() }
             ?.let { add(it) }

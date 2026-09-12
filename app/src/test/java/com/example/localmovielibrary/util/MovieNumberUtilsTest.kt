@@ -81,4 +81,24 @@ class MovieNumberUtilsTest {
         assertEquals(MovieVariant.FourK60Fps, extractMovieSourceIdentity("HMN-645_4K60FPS.mp4")?.variant)
         assertEquals(MovieVariant.FourK, extractMovieSourceIdentity("START-155_4Ks.mp4")?.variant)
     }
+
+    @Test
+    fun mapsPlaybackSourcesToOneMovieMetadataBaseName() {
+        val baseNames = listOf(
+            "【水野朝陽】BF-287-U.strm",
+            "【水野朝陽】BF-287-C.strm",
+            "【水野朝陽】BF-287-WM.strm",
+            "【水野朝陽】BF-287-P2-4K.strm"
+        ).map { movieMetadataBaseNames(it).first() }
+
+        assertEquals(List(4) { "【水野朝陽】BF-287" }, baseNames)
+    }
+
+    @Test
+    fun ordersMovieMetadataBeforeLegacyPlaybackSourceMetadata() {
+        assertEquals(
+            listOf("【水野朝陽】BF-287", "【水野朝陽】BF-287-U"),
+            movieMetadataBaseNames("【水野朝陽】BF-287-U.strm")
+        )
+    }
 }

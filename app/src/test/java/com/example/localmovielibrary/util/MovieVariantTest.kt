@@ -34,4 +34,14 @@ class MovieVariantTest {
         assertEquals("-P4", playbackSourceSuffix("P4", MovieVariant.Standard))
         assertEquals("-P4-8K", playbackSourceSuffix("P4", MovieVariant.EightK))
     }
+
+    @Test
+    fun preservesShortPlaybackSourceMarkers() {
+        assertEquals("-U", playbackSourceSuffixFromText("BF-287-U.mp4"))
+        assertEquals("-C", playbackSourceSuffixFromText("BF-287-C.mp4"))
+        assertEquals("-WM", playbackSourceSuffixFromText("BF-287-WM.mp4"))
+        assertEquals("-U-4K", playbackSourceSuffixFromText("BF-287-U-4K.mp4"))
+        assertEquals("-P3-8K", playbackSourceSuffixFromText("BF-287.part3_8K.mp4"))
+        assertEquals("-4K", playbackSourceSuffixFromText("BF-287-UHD.mp4"))
+    }
 }

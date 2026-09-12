@@ -38,9 +38,9 @@ import com.example.localmovielibrary.scraper.prioritizeActorImageUrls
 import com.example.localmovielibrary.scraper.isMovieScopedActorName
 import com.example.localmovielibrary.util.MovieVariant
 import com.example.localmovielibrary.util.detectMovieVariant
-import com.example.localmovielibrary.util.displayNumberWithVariant
 import com.example.localmovielibrary.util.extractMovieNumberInfo
-import com.example.localmovielibrary.util.playbackSourceSuffix
+import com.example.localmovielibrary.util.movieMetadataBaseNames
+import com.example.localmovielibrary.util.playbackSourceSuffixFromText
 import com.example.localmovielibrary.scraper.primaryActorName
 import com.example.localmovielibrary.scraper.withSupplementalActors
 import kotlinx.coroutines.CancellationException
@@ -618,8 +618,11 @@ class StrmScrapeRepository(
             deleteRecursively(target.directory)
             logStore.append("Deleted generated movie directory: ${target.directory.name}")
         } else {
-            deleteMetadataFiles(target.directory, target.baseName)
-            logStore.append("Deleted metadata files for baseName=${target.baseName}")
+            val metadataBaseNames = movieMetadataBaseNames(target.file.name.orEmpty())
+            metadataBaseNames.forEach { baseName ->
+                deleteMetadataFiles(target.directory, baseName)
+            }
+            logStore.append("Deleted metadata files for baseNames=${metadataBaseNames.joinToString()}")
         }
 
         logStore.append("Clear scrape files finished: $number")
@@ -877,7 +880,6 @@ class StrmScrapeRepository(
     ): String {
         val sourceName = target.file.name.orEmpty()
         val baseNumber = info.number.ifBlank { fallbackNumber }.uppercase()
-        val variant = detectMovieVariant(sourceName)
         val writeInfo = info.copy(number = baseNumber)
         val distinctSuffix = if (forceDistinct) target.file.name.orEmpty().distinctPickcodeSuffix() else null
         val baseName = buildMovieBaseName(writeInfo, baseNumber) + distinctSuffix.orEmpty()
@@ -905,8 +907,7 @@ class StrmScrapeRepository(
 
         logStore.append("Movie directory: ${movieDirectory.name}")
 
-        val partLabel = extractMovieNumberInfo(target.file.name.orEmpty())?.partLabel
-        val strmName = "$baseName${playbackSourceSuffix(partLabel, variant)}.strm"
+        val strmName = "$baseName${playbackSourceSuffixFromText(sourceName)}.strm"
         val newStrm = copyStrmFile(target.file, movieDirectory, strmName)
         logStore.append("STRM written: $strmName")
 
@@ -949,14 +950,15 @@ class StrmScrapeRepository(
     }
 
     private suspend fun rewriteScrapeFilesInPlace(target: StrmTarget, info: ScrapedMovieInfo) {
-        val baseName = target.baseName
+        val baseName = movieMetadataBaseNames(target.file.name.orEmpty()).first()
         val directory = target.directory
         val nfoName = "$baseName.nfo"
         val replacesJavdbMetadata = directory.findFile(nfoName)
             ?.let(::isJavdbMetadataNfo)
             ?: false
-        val displayNumber = displayNumberWithVariant(info.number, target.file.name.orEmpty())
-        val writeInfo = info.copy(number = displayNumber)
+        val movieNumber = extractMovieNumberInfo(info.number)?.number
+            ?: info.number.trim().uppercase()
+        val writeInfo = info.copy(number = movieNumber)
         logStore.append("Rewrite NFO: $nfoName")
         writeTextFile(directory, nfoName, NfoWriter.build(writeInfo))
         logStore.append("NFO rewritten: $nfoName")
@@ -1516,7 +1518,9 @@ class StrmScrapeRepository(
         val names = children.mapNotNull { it.name?.lowercase() }.toSet()
         children.filter { it.isFile && it.name.orEmpty().endsWith(".strm", ignoreCase = true) }.forEach { strm ->
             val baseName = strm.name.orEmpty().substringBeforeLast('.', strm.name.orEmpty())
-            if ("${baseName.lowercase()}.nfo" !in names) {
+            val hasMetadata = movieMetadataBaseNames(strm.name.orEmpty())
+                .any { metadataBaseName -> "${metadataBaseName.lowercase()}.nfo" in names }
+            if (!hasMetadata) {
                 out += StrmTarget(directory, strm, baseName, parentDirectory = null)
             }
         }
