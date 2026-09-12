@@ -19,6 +19,7 @@ import com.example.localmovielibrary.data.repository.CloudStrmRecordRepository
 import com.example.localmovielibrary.data.repository.MovieRepository
 import com.example.localmovielibrary.data.repository.StrmScrapeRepository
 import com.example.localmovielibrary.data.repository.ActorAvatarUpdateState
+import com.example.localmovielibrary.data.local.MovieEntity
 import com.example.localmovielibrary.scraper.ScrapeSource
 import com.example.localmovielibrary.scraper.SourceProbeResult
 import com.example.localmovielibrary.scraper.SourceProbeStatus
@@ -49,6 +50,7 @@ class SettingsViewModel(
     val actorAvatarUpdateState: StateFlow<ActorAvatarUpdateState> = scrapeRepository.actorAvatarUpdateState
     private var qrLoginJob: Job? = null
     private var asrDownloadJob: Job? = null
+    private var metadataRescrapeMovies: List<MovieEntity> = emptyList()
 
     fun refreshSavedCloud115Accounts() {
         viewModelScope.launch {
@@ -669,9 +671,10 @@ class SettingsViewModel(
      * 操作：
      * 1) 在 IO 线程读取影片和演员列表。
      * 2) 交给仓库后台任务，避免阻塞设置页。
-     */
+    */
     fun updateMissingActorAvatars() {
-        if (actorAvatarUpdateState.value.isUpdating || uiState.value.isRepairingFavoriteMetadata) return
+        val state = uiState.value
+        if (actorAvatarUpdateState.value.isUpdating || state.isBatchRescrapingMetadata || state.isLoadingMetadataRescrapeMovies) return
         viewModelScope.launch {
             _uiState.update { it.copy(savedMessage = "正在读取影片演员列表...") }
             runCatching { movieRepository.getMoviesForActorAvatarUpdate() }
@@ -701,72 +704,143 @@ class SettingsViewModel(
 
     /*
      * ================================================================================
-     * 步骤2：修复收藏影片资料
+     * 步骤2：准备批量多源重刮影片
      * ================================================================================
-     * 目标：只重新刮削收藏影片，补齐演员、简介和头像等 NFO 字段。
-     * 数据源：Room 收藏轻量记录和 DMM/FANZA 优先重新刮削链。
+     * 目标：读取当前影片库候选，供用户选择部分影片或全库。
+     * 数据源：当前影片库根目录下的 Room 轻量记录。
      * 操作：
-     * 1) 只读取 isFavorite=1 的影片，不影响非收藏内容。
-     * 2) 每部影片完成后刷新库记录，单片失败继续处理下一部。
+     * 1) 只读取当前配置的影片库根目录，不跨库处理旧资料。
+     * 2) 向界面提供稳定的影片 ID 和文件名，不创建元数据快照。
      */
-    fun repairFavoriteMovieMetadata() {
-        if (actorAvatarUpdateState.value.isUpdating || uiState.value.isRepairingFavoriteMetadata) return
+    fun openMetadataRescrapePicker() {
+        val state = uiState.value
+        if (actorAvatarUpdateState.value.isUpdating || state.isBatchRescrapingMetadata || state.isLoadingMetadataRescrapeMovies) return
         viewModelScope.launch {
-            Log.i("SettingsViewModel", "开始修复收藏影片资料")
+            Log.i("SettingsViewModel", "开始读取批量多源重刮候选")
             _uiState.update {
                 it.copy(
-                    isRepairingFavoriteMetadata = true,
-                    favoriteMetadataRepairMessage = "正在读取收藏影片...",
-                    savedMessage = "正在读取收藏影片..."
+                    isLoadingMetadataRescrapeMovies = true,
+                    batchMetadataRescrapeMessage = "正在读取当前影片库...",
+                    savedMessage = null
                 )
             }
             try {
-                // 2.1 读取收藏范围并为每部影片更新可见进度。
-                val movies = movieRepository.getFavoriteMoviesForMetadataRepair()
+                // 2.1 按当前影片库根目录读取候选。
+                val libraryRootUri = repository.getLibraryRootUri()
+                    ?.takeIf { it.isNotBlank() }
+                    ?: error("请先选择影片库目录")
+                val movies = movieRepository.getMoviesForMetadataRescrape(libraryRootUri)
+                metadataRescrapeMovies = movies
                 if (movies.isEmpty()) {
                     _uiState.update {
                         it.copy(
-                            favoriteMetadataRepairMessage = "没有可修复的收藏影片",
-                            savedMessage = "没有可修复的收藏影片"
+                            batchMetadataRescrapeMessage = "当前影片库没有可重刮影片",
+                            savedMessage = "当前影片库没有可重刮影片"
                         )
                     }
                     return@launch
                 }
 
-                var repaired = 0
-                var failed = 0
-                movies.forEachIndexed { index, movie ->
-                    _uiState.update {
-                        it.copy(favoriteMetadataRepairMessage = "正在修复收藏影片：${index + 1}/${movies.size}")
-                    }
-                    // 2.2 自动优先链会把完整资料写回原 NFO。
-                    try {
-                        scrapeRepository.rescrapeMovie(movie, ScrapeSource.Dmm2, automaticPriority = true)
-                        movieRepository.refreshMovieRecoveringMovedStrm(movie.id)
-                            ?: error("收藏影片刷新失败：${movie.videoName}")
-                        repaired += 1
-                    } catch (error: CancellationException) {
-                        throw error
-                    } catch (error: Exception) {
-                        failed += 1
-                        Log.w("SettingsViewModel", "收藏影片资料修复失败：${movie.videoName}", error)
-                    }
-                }
-
-                val result = "收藏资料修复完成：$repaired/${movies.size}${if (failed > 0) "，失败 $failed" else ""}"
+                // 2.2 打开选择界面，默认全选但允许逐片取消。
                 _uiState.update {
-                    it.copy(favoriteMetadataRepairMessage = result, savedMessage = result)
+                    it.copy(
+                        isMetadataRescrapePickerVisible = true,
+                        metadataRescrapeCandidates = movies.map { movie ->
+                            MetadataRescrapeCandidate(
+                                id = movie.id,
+                                displayName = movie.videoName.substringBeforeLast(".strm", movie.videoName)
+                            )
+                        },
+                        batchMetadataRescrapeMessage = null
+                    )
                 }
             } catch (error: CancellationException) {
                 throw error
             } catch (error: Exception) {
-                val message = error.message ?: "读取收藏影片失败"
+                val message = error.message ?: "读取影片列表失败"
                 _uiState.update {
-                    it.copy(favoriteMetadataRepairMessage = message, savedMessage = message)
+                    it.copy(batchMetadataRescrapeMessage = message, savedMessage = message)
                 }
             } finally {
-                _uiState.update { it.copy(isRepairingFavoriteMetadata = false) }
-                Log.i("SettingsViewModel", "收藏影片资料修复结束")
+                _uiState.update { it.copy(isLoadingMetadataRescrapeMovies = false) }
+                Log.i("SettingsViewModel", "批量多源重刮候选读取结束")
+            }
+        }
+    }
+
+    fun dismissMetadataRescrapePicker() {
+        Log.i("SettingsViewModel", "关闭批量多源重刮选择")
+        _uiState.update { it.copy(isMetadataRescrapePickerVisible = false) }
+    }
+
+    /*
+     * ================================================================================
+     * 步骤3：批量多源重刮选定影片
+     * ================================================================================
+     * 目标：用正式自动优先链重写用户选定影片的 NFO、图片和 Room 记录。
+     * 数据源：步骤2读取的当前影片库候选和用户选择的影片 ID。
+     * 操作：
+     * 1) 按候选原顺序逐片重刮，单片失败时记录原因并继续。
+     * 2) 汇总成功和失败数量，不保存快照或额外缓存。
+     */
+    fun rescrapeSelectedMovieMetadata(selectedMovieIds: Set<Long>) {
+        val state = uiState.value
+        if (actorAvatarUpdateState.value.isUpdating || state.isBatchRescrapingMetadata) return
+        val movies = metadataRescrapeMovies.filter { it.id in selectedMovieIds }
+        if (movies.isEmpty()) {
+            _uiState.update { it.copy(savedMessage = "请至少选择一部影片") }
+            return
+        }
+
+        viewModelScope.launch {
+            Log.i("SettingsViewModel", "开始批量多源重刮：${movies.size} 部")
+            scrapeRepository.appendLog("开始批量多源重刮：total=${movies.size}")
+            _uiState.update {
+                it.copy(
+                    isMetadataRescrapePickerVisible = false,
+                    isBatchRescrapingMetadata = true,
+                    batchMetadataRescrapeMessage = "正在重刮：0/${movies.size}",
+                    savedMessage = null
+                )
+            }
+            var succeeded = 0
+            var failed = 0
+            try {
+                movies.forEachIndexed { index, movie ->
+                    // 3.1 更新逐片进度并复用正式多源重刮链。
+                    _uiState.update {
+                        it.copy(batchMetadataRescrapeMessage = "正在重刮：${index + 1}/${movies.size}  ${movie.videoName}")
+                    }
+                    try {
+                        scrapeRepository.rescrapeMovie(movie, ScrapeSource.Dmm2, automaticPriority = true)
+                        movieRepository.refreshMovieRecoveringMovedStrm(movie.id)
+                            ?: error("影片刷新失败：${movie.videoName}")
+                        succeeded += 1
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: Exception) {
+                        failed += 1
+                        val reason = error.message ?: error::class.java.simpleName
+                        Log.w("SettingsViewModel", "批量多源重刮失败：${movie.videoName}", error)
+                        scrapeRepository.appendLog("批量多源重刮失败：${movie.videoName}，$reason")
+                    }
+                }
+
+                // 3.2 汇总本轮结果，失败详情保留在刮削日志。
+                val result = "批量多源重刮完成：$succeeded/${movies.size}${if (failed > 0) "，失败 $failed（见刮削日志）" else ""}"
+                scrapeRepository.appendLog("批量多源重刮结束：success=$succeeded, failed=$failed, total=${movies.size}")
+                _uiState.update {
+                    it.copy(batchMetadataRescrapeMessage = result, savedMessage = result)
+                }
+            } finally {
+                metadataRescrapeMovies = emptyList()
+                _uiState.update {
+                    it.copy(
+                        isBatchRescrapingMetadata = false,
+                        metadataRescrapeCandidates = emptyList()
+                    )
+                }
+                Log.i("SettingsViewModel", "批量多源重刮结束：成功 $succeeded，失败 $failed")
             }
         }
     }
@@ -988,8 +1062,11 @@ data class SettingsUiState(
     val isReorganizing: Boolean = false,
     val isRebuildingStrmIndex: Boolean = false,
     val isScraping: Boolean = false,
-    val isRepairingFavoriteMetadata: Boolean = false,
-    val favoriteMetadataRepairMessage: String? = null,
+    val isLoadingMetadataRescrapeMovies: Boolean = false,
+    val isMetadataRescrapePickerVisible: Boolean = false,
+    val isBatchRescrapingMetadata: Boolean = false,
+    val metadataRescrapeCandidates: List<MetadataRescrapeCandidate> = emptyList(),
+    val batchMetadataRescrapeMessage: String? = null,
     val scrapeLog: String = "",
     val testingScrapeSource: ScrapeSource? = null,
     val dmmProbeMessage: String? = null,
@@ -1005,4 +1082,9 @@ data class SettingsUiState(
     val hasJavlibraryCookie: Boolean
         get() = javlibraryCookies.isNotBlank()
 }
+
+data class MetadataRescrapeCandidate(
+    val id: Long,
+    val displayName: String
+)
 

@@ -20,6 +20,8 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
@@ -30,13 +32,14 @@ import androidx.compose.material.icons.rounded.Article
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.DeleteSweep
-import androidx.compose.material.icons.rounded.Favorite
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Public
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Save
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -244,7 +247,7 @@ fun SettingsScreen(
                         onRefreshCacheSize = ::refreshImageCacheSize,
                         onClearImageCache = { showImageCacheDialog = true },
                         onUpdateMissingActorAvatars = viewModel::updateMissingActorAvatars,
-                        onRepairFavoriteMovieMetadata = viewModel::repairFavoriteMovieMetadata,
+                        onOpenMetadataRescrapePicker = viewModel::openMetadataRescrapePicker,
                         onTestScrapeSource = viewModel::testScrapeSource,
                         onOpenJavdbWeb = onOpenJavdbWeb,
                         onOpenJavlibraryWeb = onOpenJavlibraryWeb,
@@ -351,6 +354,13 @@ fun SettingsScreen(
                     viewModel.saveBaiduTranslateSettings()
                     showTranslateDialog = false
                 }
+            )
+        }
+        if (uiState.isMetadataRescrapePickerVisible) {
+            MetadataRescrapeSelectionDialog(
+                candidates = uiState.metadataRescrapeCandidates,
+                onDismiss = viewModel::dismissMetadataRescrapePicker,
+                onConfirm = viewModel::rescrapeSelectedMovieMetadata
             )
         }
     }
@@ -1054,7 +1064,7 @@ private fun ScrapeSettingsPage(
     onRefreshCacheSize: () -> Unit,
     onClearImageCache: () -> Unit,
     onUpdateMissingActorAvatars: () -> Unit,
-    onRepairFavoriteMovieMetadata: () -> Unit,
+    onOpenMetadataRescrapePicker: () -> Unit,
     onTestScrapeSource: (ScrapeSource) -> Unit,
     onOpenJavdbWeb: () -> Unit,
     onOpenJavlibraryWeb: () -> Unit,
@@ -1092,10 +1102,15 @@ private fun ScrapeSettingsPage(
     ActorAvatarUpdatePanel(
         state = actorAvatarUpdateState,
         gfriendsEnabled = uiState.gfriendsActorAvatarEnabled,
-        isRepairingFavorites = uiState.isRepairingFavoriteMetadata,
-        favoriteRepairMessage = uiState.favoriteMetadataRepairMessage,
-        onUpdate = onUpdateMissingActorAvatars,
-        onRepairFavorites = onRepairFavoriteMovieMetadata
+        isBatchRescraping = uiState.isBatchRescrapingMetadata,
+        onUpdate = onUpdateMissingActorAvatars
+    )
+    BatchMetadataRescrapePanel(
+        isLoading = uiState.isLoadingMetadataRescrapeMovies,
+        isRunning = uiState.isBatchRescrapingMetadata,
+        enabled = !actorAvatarUpdateState.isUpdating,
+        message = uiState.batchMetadataRescrapeMessage,
+        onOpenPicker = onOpenMetadataRescrapePicker
     )
     SettingsSectionTitle("DMM2 跳过")
     Dmm2SkippedPrefixPanel(
@@ -2720,10 +2735,8 @@ private fun JavlibraryCookieStatusCard(
 private fun ActorAvatarUpdatePanel(
     state: com.example.localmovielibrary.data.repository.ActorAvatarUpdateState,
     gfriendsEnabled: Boolean,
-    isRepairingFavorites: Boolean,
-    favoriteRepairMessage: String?,
-    onUpdate: () -> Unit,
-    onRepairFavorites: () -> Unit
+    isBatchRescraping: Boolean,
+    onUpdate: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -2738,7 +2751,7 @@ private fun ActorAvatarUpdatePanel(
             fontWeight = FontWeight.Bold
         )
         Text(
-            text = favoriteRepairMessage ?: state.message ?: "全库重新匹配演员头像，不修改影片信息",
+            text = state.message ?: "全库重新匹配演员头像，不修改影片信息",
             color = Color.White.copy(alpha = 0.62f),
             style = MaterialTheme.typography.bodySmall
         )
@@ -2751,12 +2764,12 @@ private fun ActorAvatarUpdatePanel(
             color = Color.White.copy(alpha = 0.62f),
             style = MaterialTheme.typography.bodySmall
         )
-        if (state.isUpdating || isRepairingFavorites) {
+        if (state.isUpdating || isBatchRescraping) {
             LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
         }
         Button(
             onClick = onUpdate,
-            enabled = !state.isUpdating && !isRepairingFavorites,
+            enabled = !state.isUpdating && !isBatchRescraping,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp)
         ) {
@@ -2771,27 +2784,152 @@ private fun ActorAvatarUpdatePanel(
             }
             Text("全库重匹配演员头像", modifier = Modifier.padding(start = 8.dp))
         }
+    }
+}
+
+@Composable
+private fun BatchMetadataRescrapePanel(
+    isLoading: Boolean,
+    isRunning: Boolean,
+    enabled: Boolean,
+    message: String?,
+    onOpenPicker: () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Color.White.copy(alpha = 0.075f), RoundedCornerShape(16.dp))
+            .padding(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            text = "批量多源重刮削",
+            color = Color.White,
+            fontWeight = FontWeight.Bold
+        )
+        Text(
+            text = message ?: "从当前影片库选择部分影片或全库",
+            color = Color.White.copy(alpha = 0.62f),
+            style = MaterialTheme.typography.bodySmall
+        )
+        if (isLoading || isRunning) {
+            LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+        }
         Button(
-            onClick = onRepairFavorites,
-            enabled = !state.isUpdating && !isRepairingFavorites,
+            onClick = onOpenPicker,
+            enabled = enabled && !isLoading && !isRunning,
             modifier = Modifier.fillMaxWidth(),
             shape = RoundedCornerShape(18.dp)
         ) {
-            if (isRepairingFavorites) {
+            if (isLoading || isRunning) {
                 CircularProgressIndicator(
                     modifier = Modifier.padding(end = 8.dp).heightIn(max = 18.dp),
                     strokeWidth = 2.dp,
                     color = Color.White
                 )
             } else {
-                Icon(Icons.Rounded.Favorite, contentDescription = null)
+                Icon(Icons.Rounded.Refresh, contentDescription = null)
             }
             Text(
-                if (isRepairingFavorites) "正在修复收藏影片" else "修复收藏影片资料",
+                when {
+                    isLoading -> "正在读取影片"
+                    isRunning -> "正在批量重刮"
+                    else -> "选择影片或全库"
+                },
                 modifier = Modifier.padding(start = 8.dp)
             )
         }
     }
+}
+
+@Composable
+private fun MetadataRescrapeSelectionDialog(
+    candidates: List<MetadataRescrapeCandidate>,
+    onDismiss: () -> Unit,
+    onConfirm: (Set<Long>) -> Unit
+) {
+    var query by remember(candidates) { mutableStateOf("") }
+    var selectedIds by remember(candidates) { mutableStateOf(candidates.map { it.id }.toSet()) }
+    val visibleCandidates = remember(candidates, query) {
+        val normalized = query.trim()
+        if (normalized.isBlank()) candidates else candidates.filter {
+            it.displayName.contains(normalized, ignoreCase = true)
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("选择重刮影片") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("已选 ${selectedIds.size}/${candidates.size} 部。开始后会重写 NFO 和图片。")
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true,
+                    label = { Text("搜索番号或文件名") }
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text("当前显示 ${visibleCandidates.size} 部")
+                    TextButton(
+                        onClick = {
+                            selectedIds = if (selectedIds.size == candidates.size) {
+                                emptySet()
+                            } else {
+                                candidates.map { it.id }.toSet()
+                            }
+                        }
+                    ) {
+                        Text(if (selectedIds.size == candidates.size) "全不选" else "全选")
+                    }
+                }
+                LazyColumn(modifier = Modifier.heightIn(max = 420.dp)) {
+                    items(visibleCandidates, key = { it.id }) { candidate ->
+                        val selected = candidate.id in selectedIds
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    selectedIds = if (selected) {
+                                        selectedIds - candidate.id
+                                    } else {
+                                        selectedIds + candidate.id
+                                    }
+                                }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Checkbox(checked = selected, onCheckedChange = null)
+                            Text(
+                                text = candidate.displayName,
+                                modifier = Modifier.padding(start = 8.dp),
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = { onConfirm(selectedIds) },
+                enabled = selectedIds.isNotEmpty()
+            ) {
+                Text("开始重刮（${selectedIds.size}）")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("取消")
+            }
+        }
+    )
 }
 
 @Composable

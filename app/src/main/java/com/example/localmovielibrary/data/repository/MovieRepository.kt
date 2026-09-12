@@ -74,8 +74,9 @@ class MovieRepository(
         movieDao.getMoviesForMetadataLookupLite()
     }
 
-    suspend fun getFavoriteMoviesForMetadataRepair(): List<MovieEntity> = withContext(Dispatchers.IO) {
-        movieDao.getFavoriteMoviesForMetadataLookupLite()
+    suspend fun getMoviesForMetadataRescrape(libraryRootUri: String): List<MovieEntity> = withContext(Dispatchers.IO) {
+        movieDao.getMoviesByLibraryRootLite(libraryRootUri)
+            .sortedBy { it.videoName.lowercase(Locale.ROOT) }
     }
 
     private suspend fun loadMovieListItems(favoritesOnly: Boolean): List<MovieEntity> = withContext(Dispatchers.IO) {

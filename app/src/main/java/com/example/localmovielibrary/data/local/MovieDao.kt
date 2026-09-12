@@ -152,21 +152,6 @@ interface MovieDao {
 
     @Query(
         """
-        SELECT
-            id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
-            NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
-            studios, series, directors, actors, genres, tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
-            scannedAtMillis, isFavorite, isWatched, updatedAt
-        FROM movies
-        WHERE isFavorite = 1
-        ORDER BY updatedAt DESC, scannedAtMillis DESC
-        """
-    )
-    suspend fun getFavoriteMoviesForMetadataLookupLite(): List<MovieEntity>
-
-    @Query(
-        """
         SELECT 
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
