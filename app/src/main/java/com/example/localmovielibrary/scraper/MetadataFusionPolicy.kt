@@ -78,20 +78,64 @@ internal fun reviewMakerActorEvidence(
         .distinct()
     if (officialNames.isEmpty()) return ActorEvidenceReview(official + external)
 
-    val creditsByActor = linkedMapOf<String, MutableList<String>>()
-    external.forEach { info ->
-        info.actors.forEach { rawActor ->
+    /*
+     * ================================================================================
+     * 步骤1：消解作品署名与演员身份
+     * ================================================================================
+     * 目标：拒绝同一来源把一个作品署名同时绑定给多名演员的冲突关系。
+     * 数据源：官方演员署名、外部演员主名及其显式别名。
+     * 操作：
+     * 1) 单一候选保持原有映射。
+     * 2) 多候选时只接受被另一独立来源重复支持的唯一演员。
+     * 3) 没有唯一支持者时保留待核，不猜测身份。
+     */
+    val creditCandidates = external.flatMap { info ->
+        info.actors.flatMap { rawActor ->
             val actor = rawActor.primaryActorName()
             val aliases = (actorNameParts(rawActor).drop(1) + info.actorAliases
                 .filterKeys { stored -> actorNamesHaveExactVariant(stored, actor) }
                 .values.flatten())
                 .flatMap(::actorNameParts)
-            aliases.forEach { alias ->
-                val credit = officialNames.firstOrNull { officialName ->
+            aliases.mapNotNull { alias ->
+                officialNames.firstOrNull { officialName ->
                     actorNamesHaveExactVariant(officialName, alias)
-                } ?: return@forEach
-                creditsByActor.getOrPut(actor) { mutableListOf() }.add(credit)
+                }?.let { credit -> actor to credit }
             }
+        }
+    }
+    val creditsByActor = linkedMapOf<String, MutableList<String>>()
+    val discardedConflictActors = mutableListOf<String>()
+    officialNames.forEach { credit ->
+        // 1.1 同一作品署名的演员候选按明确姓名变体归并。
+        val candidates = creditCandidates
+            .filter { (_, candidateCredit) -> actorNamesHaveExactVariant(candidateCredit, credit) }
+            .map(Pair<String, String>::first)
+            .distinctBy { actor -> actorNameVariants(actor).sorted().joinToString("|") }
+        val selected = when (candidates.size) {
+            0 -> null
+            1 -> candidates.single()
+            else -> {
+                // 1.2 只有跨来源重复出现的唯一候选能打破来源内部冲突。
+                val supportByActor = candidates.associateWith { actor ->
+                    external.withIndex().filter { (_, info) ->
+                        info.actors.any { rawActor ->
+                            actorNamesHaveExactVariant(rawActor.primaryActorName(), actor)
+                        }
+                    }.map { (index, info) ->
+                        info.source.trim().lowercase().ifBlank { "source-$index" }
+                    }.toSet().size
+                }
+                val highestSupport = supportByActor.values.maxOrNull() ?: 0
+                val supported = candidates.filter { actor -> supportByActor[actor] == highestSupport }
+                supported.singleOrNull()?.takeIf { highestSupport >= 2 }?.also { winner ->
+                    discardedConflictActors += candidates.filterNot { actor ->
+                        actorNamesHaveExactVariant(actor, winner)
+                    }
+                }
+            }
+        }
+        if (selected != null) {
+            creditsByActor.getOrPut(selected) { mutableListOf() }.add(credit)
         }
     }
     val credits = creditsByActor.mapValues { (_, names) -> names.distinct() }
@@ -136,11 +180,14 @@ internal fun reviewMakerActorEvidence(
     fun isUnresolved(name: String): Boolean = unresolvedNames.any { unresolved ->
         actorNamesHaveExactVariant(unresolved, name)
     }
+    fun isDiscardedConflict(name: String): Boolean = discardedConflictActors.any { discarded ->
+        actorNamesHaveExactVariant(discarded, name)
+    } && credits.keys.none { accepted -> actorNamesHaveExactVariant(accepted, name) }
     val reviewed = (official + external).map { info ->
         val aliases = info.actorAliases.mapNotNull { (actor, names) ->
-            if (isMovieCredit(actor) || isUnresolved(actor)) return@mapNotNull null
+            if (isMovieCredit(actor) || isUnresolved(actor) || isDiscardedConflict(actor)) return@mapNotNull null
             names.flatMap(::actorNameParts)
-                .filterNot { name -> isMovieCredit(name) || isUnresolved(name) }
+                .filterNot { name -> isMovieCredit(name) || isUnresolved(name) || isDiscardedConflict(name) }
                 .distinct()
                 .takeIf(List<String>::isNotEmpty)
                 ?.let { actor to it }
@@ -148,16 +195,20 @@ internal fun reviewMakerActorEvidence(
         info.copy(
             actors = info.actors.filterNot { actor ->
                 val name = actor.primaryActorName()
-                isMovieCredit(name) || isUnresolved(name)
+                isMovieCredit(name) || isUnresolved(name) || isDiscardedConflict(name)
             },
             actorAliases = aliases,
             actorImageUrls = info.actorImageUrls.filterKeys { name ->
-                !isMovieCredit(name.primaryActorName()) && !isUnresolved(name.primaryActorName())
+                !isMovieCredit(name.primaryActorName()) && !isUnresolved(name.primaryActorName()) &&
+                    !isDiscardedConflict(name.primaryActorName())
             },
             actorImageCandidates = info.actorImageCandidates.filterKeys { name ->
-                !isMovieCredit(name.primaryActorName()) && !isUnresolved(name.primaryActorName())
+                !isMovieCredit(name.primaryActorName()) && !isUnresolved(name.primaryActorName()) &&
+                    !isDiscardedConflict(name.primaryActorName())
             },
-            verifiedActorNames = info.verifiedActorNames.filterNot { isMovieCredit(it) || isUnresolved(it) }
+            verifiedActorNames = info.verifiedActorNames.filterNot {
+                isMovieCredit(it) || isUnresolved(it) || isDiscardedConflict(it)
+            }
         )
     }.filter { info -> info.actors.isNotEmpty() || info.excludedActorNames.isNotEmpty() }
     return ActorEvidenceReview(reviewed, credits, unresolvedNames)

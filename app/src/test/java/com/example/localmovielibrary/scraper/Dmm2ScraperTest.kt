@@ -170,6 +170,26 @@ class Dmm2ScraperTest {
         assertEquals("", dmmDurationToRuntimeMinutes(-1))
     }
 
+    /*
+     * ================================================================================
+     * 步骤2：验证 DMM/FANZA 日本发行日期
+     * ================================================================================
+     * 目标：UTC 与日本偏移格式必须得到同一个日本自然日。
+     * 数据源：PPVContent.deliveryStartDate 的两种等价时间戳。
+     * 操作：
+     * 1) UTC 15:00 转换为次日日本日期。
+     * 2) 日本零点保持当天日期。
+     */
+    @Test
+    fun deliveryStartDateUsesJapanCalendarDay() {
+        // 2.1 两种时区表示都应保留 DMM/FANZA 商品页使用的日本日期。
+        for (value in listOf("2025-09-21T15:00:00Z", "2025-09-22T00:00:00+09:00")) {
+            val detail = capturedDetail()
+            detail.getJSONObject("data").getJSONObject("ppvContent").put("deliveryStartDate", value)
+            assertEquals("2025-09-22", scrapeCapturedDetail(detail).premiered)
+        }
+    }
+
     @Test
     fun dmmFanzaActorImageCandidatesSwitchBetweenOfficialCdnHosts() {
         val awsUrl = "https://awsimgsrc.dmm.co.jp/pics_dig/mono/actjpgs/actor.jpg"

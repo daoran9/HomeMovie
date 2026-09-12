@@ -177,6 +177,57 @@ class MetadataFusionPolicyTest {
         assertTrue(NfoWriter.build(merged).contains("<role>作品署名</role>"))
     }
 
+    /*
+     * ================================================================================
+     * 步骤1：验证冲突作品署名的跨来源消解
+     * ================================================================================
+     * 目标：同一来源把一个署名挂给多名演员时，不向多人写入同一个 role。
+     * 数据源：一个官方署名、一个独立演员来源和一个内部冲突来源。
+     * 操作：
+     * 1) 保留跨来源重复出现的唯一演员。
+     * 2) 删除只由冲突来源支持的候选及其署名映射。
+     */
+    @Test fun corroboratedActorWinsWhenOneSourceMapsCreditToMultipleActors() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("作品署名")),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("確認芸名")),
+            ScrapeSource.Javdb to info("javdb").copy(
+                actors = listOf("確認芸名", "誤候補"),
+                actorAliases = mapOf(
+                    "確認芸名" to listOf("作品署名", "旧芸名"),
+                    "誤候補" to listOf("作品署名", "別名")
+                ),
+                verifiedActorNames = listOf("確認芸名", "誤候補")
+            )
+        )
+
+        // 1.1 冲突来源不能让同一作品署名同时落到两名演员。
+        assertEquals(listOf("確認芸名"), merged.actors)
+        assertEquals(mapOf("確認芸名" to listOf("作品署名")), merged.actorCredits)
+        assertEquals(listOf("旧芸名"), merged.actorAliases["確認芸名"])
+        assertTrue(merged.unverifiedActorNames.isEmpty())
+        val nfo = NfoWriter.build(merged)
+        assertEquals(1, Regex("<role>作品署名</role>").findAll(nfo).count())
+        assertFalse(nfo.contains("誤候補"))
+    }
+
+    @Test fun tiedConflictingCreditCandidatesRemainPending() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("作品署名")),
+            ScrapeSource.Javdb to info("javdb").copy(
+                actors = listOf("候補甲", "候補乙"),
+                actorAliases = mapOf(
+                    "候補甲" to listOf("作品署名"),
+                    "候補乙" to listOf("作品署名")
+                )
+            )
+        )
+
+        assertEquals(setOf("候補甲", "候補乙"), merged.actors.toSet())
+        assertTrue(merged.actorCredits.isEmpty())
+        assertEquals(listOf("作品署名"), merged.unverifiedActorNames)
+    }
+
     @Test fun explicitJointCastAllowsPartialListsAndDifferentPublicAliases() {
         val merged = fuse(
             ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("芸名甲")),

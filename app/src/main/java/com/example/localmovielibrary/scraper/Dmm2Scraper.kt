@@ -13,10 +13,10 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
-import java.text.SimpleDateFormat
-import java.util.Calendar
+import java.time.OffsetDateTime
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 import java.util.Locale
-import java.util.TimeZone
 
 internal const val DMM_EMPTY_SEARCH_RETRY_COUNT = 3
 internal const val DMM_EMPTY_SEARCH_RETRY_DELAY_MS = 750L
@@ -354,10 +354,23 @@ class Dmm2Scraper(
             .let { if (it == thumb) buildPosterUrl(thumb) else it }
             .cleanText()
 
-        val release = parseChinaDate(
-            ppv.optString("deliveryStartDate")
-                .ifBlank { searchItem.optString("deliveryStartAt") }
-        )
+        /*
+         * ================================================================================
+         * 步骤4：按日本自然日解析发行日期
+         * ================================================================================
+         * 目标：让 DMM/FANZA 的时区时间戳保持日本站点展示的发行日期。
+         * 数据源：PPVContent.deliveryStartDate 与搜索结果 deliveryStartAt。
+         * 操作：
+         * 1) 带时区的时间戳转换到 Asia/Tokyo 后取日期。
+         * 2) 不带时区的日期保持原值。
+         */
+        val rawRelease = ppv.optString("deliveryStartDate")
+            .ifBlank { searchItem.optString("deliveryStartAt") }
+        logger?.invoke("DMM2 发行日期解析开始：number=$number, contentId=$contentId")
+
+        // 4.1 发行日属于日本商品语义，不能按 UTC 或中国时区截断。
+        val release = parseJapanDate(rawRelease)
+        logger?.invoke("DMM2 发行日期解析完成：number=$number, date=$release")
         val runtime = dmmDurationToRuntimeMinutes(ppv.optInt("duration", 0))
         /*
          * ================================================================================
@@ -504,18 +517,16 @@ class Dmm2Scraper(
     private fun buildVideoContentUrl(contentId: String): String =
         "https://video.dmm.co.jp/av/content/?id=$contentId&i3_ref=search&i3_ord=1&i3_pst=1&dmmref=video_search"
 
-    private fun parseChinaDate(value: String): String {
+    private fun parseJapanDate(value: String): String {
         val source = value.cleanText()
         if (source.isBlank()) return ""
         val date = Regex("""(\d{4})-(\d{2})-(\d{2})""").find(source)?.value ?: return ""
-        if (!source.contains("T00:00:00+09:00", ignoreCase = true)) return date
+        if (!source.contains('T')) return date
         return runCatching {
-            val formatter = SimpleDateFormat("yyyy-MM-dd", Locale.US)
-            formatter.timeZone = TimeZone.getTimeZone("Asia/Shanghai")
-            val calendar = Calendar.getInstance(TimeZone.getTimeZone("Asia/Shanghai"))
-            calendar.time = formatter.parse(date) ?: return@runCatching date
-            calendar.add(Calendar.DAY_OF_MONTH, -1)
-            formatter.format(calendar.time)
+            OffsetDateTime.parse(source, DateTimeFormatter.ISO_OFFSET_DATE_TIME)
+                .atZoneSameInstant(ZoneId.of("Asia/Tokyo"))
+                .toLocalDate()
+                .toString()
         }.getOrDefault(date)
     }
 
