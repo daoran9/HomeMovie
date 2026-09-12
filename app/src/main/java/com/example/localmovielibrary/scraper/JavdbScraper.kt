@@ -33,8 +33,9 @@ class JavdbScraper(
             return@withContext emptyList()
         }
         val detailHtml = fetch(detailUrl)
-        val (resolvedActors, aliases) = resolveActorProfiles(parseActors(detailHtml))
+        val (resolvedActors, aliases) = resolveActorProfiles(parseActorEntries(detailHtml))
         val actors = resolvedActors
+            .filterNot { actor -> actor.gender == JavdbActorGender.Male }
             .map { actor -> ActorAliasLookup(name = actor.name, aliases = aliases[actor.name].orEmpty()) }
             .distinctBy { actor -> actor.name }
         logger?.invoke("JavDB 演员别名查询完成：$normalized，${actors.size} 人")
@@ -61,7 +62,7 @@ class JavdbScraper(
             ?: error("JavDB 没有搜索到详情页：$normalized")
         logger?.invoke("JavDB 找到详情页：$detailUrl")
         val detailHtml = fetch(detailUrl)
-        val resolved = resolveActorProfiles(parseActors(detailHtml))
+        val resolved = resolveActorProfiles(parseActorEntries(detailHtml))
         parseDetail(normalized, detailUrl, detailHtml, resolved.actors, resolved.aliases, resolved.verifiedNames)
     }
 
@@ -128,9 +129,10 @@ class JavdbScraper(
             ?.let(::absoluteUrl)
             .orEmpty()
         val parsedActors = parseActorEntries(html)
-        val actors = resolvedActors ?: parsedActors
+        val actorEvidence = resolvedActors ?: parsedActors
+        val actors = actorEvidence
             .filterNot { actor -> actor.gender == JavdbActorGender.Male }
-        val excludedActorNames = parsedActors
+        val excludedActorNames = actorEvidence
             .filter { actor -> actor.gender == JavdbActorGender.Male }
             .map { actor -> actor.name }
         val actorImageUrls = actors.associate { actor -> actor.name to actor.imageUrl }
@@ -258,7 +260,7 @@ class JavdbScraper(
         val aliases = mutableMapOf<String, List<String>>()
         val verifiedNames = mutableListOf<String>()
         val resolvedActors = actors.map { actor ->
-            if (actor.profileUrl.isBlank()) return@map actor
+            if (actor.profileUrl.isBlank() || actor.gender == JavdbActorGender.Male) return@map actor
             val profileHtml = try {
                 fetch(actor.profileUrl)
             } catch (error: CancellationException) {
@@ -269,14 +271,30 @@ class JavdbScraper(
             }
             if (profileHtml == null) return@map actor
             val profileNames = parseActorProfileNames(profileHtml)
-            if (profileNames.any { name -> actorNamesHaveExactVariant(name, actor.name) }) {
+            val profileGender = parseActorProfileGender(profileHtml)
+            val resolvedGender = when {
+                actor.gender == JavdbActorGender.Male || profileGender == JavdbActorGender.Male ->
+                    JavdbActorGender.Male
+                actor.gender == JavdbActorGender.Female || profileGender == JavdbActorGender.Female ->
+                    JavdbActorGender.Female
+                else -> JavdbActorGender.Unknown
+            }
+            if (
+                resolvedGender != JavdbActorGender.Male &&
+                profileNames.any { name -> actorNamesHaveExactVariant(name, actor.name) }
+            ) {
                 verifiedNames += actor.name
             }
             val actorAliases = profileNames
                 .filter { name -> !actorNamesHaveExactVariant(name, actor.name) }
                 .distinctBy { name -> name.lowercase(Locale.ROOT) }
-            if (actorAliases.isNotEmpty()) aliases[actor.name] = actorAliases
-            actor.copy(imageUrl = parseActorProfileImageUrl(profileHtml))
+            if (resolvedGender != JavdbActorGender.Male && actorAliases.isNotEmpty()) {
+                aliases[actor.name] = actorAliases
+            }
+            actor.copy(
+                imageUrl = parseActorProfileImageUrl(profileHtml),
+                gender = resolvedGender
+            )
         }
         logger?.invoke("JavDB 演员主页证据查询结束：${resolvedActors.size} 人")
         return ResolvedActorProfiles(resolvedActors, aliases, verifiedNames.distinct())
@@ -294,8 +312,28 @@ class JavdbScraper(
         return listOf(titleNames, aliasNames)
             .flatMap { value -> cleanHtml(value).split(Regex("""[,，、/／|;；]+""")) }
             .map { name -> name.trim() }
-            .filter { name -> name.isNotBlank() && REVIEW_ACTOR_NAME.matches(name) }
+            .filter { name ->
+                name.isNotBlank() &&
+                    REVIEW_ACTOR_NAME.matches(name) &&
+                    name.lowercase(Locale.ROOT) !in ACTOR_PROFILE_ROLE_MARKERS
+            }
             .distinctBy { name -> name.lowercase(Locale.ROOT) }
+    }
+
+    internal fun parseActorProfileGender(html: String): JavdbActorGender {
+        val markers = ACTOR_PROFILE_METADATA.findAll(html)
+            .flatMap { match ->
+                cleanHtml(match.groupValues[1])
+                    .split(Regex("""[,，、/／|;；]+"""))
+                    .asSequence()
+            }
+            .map { value -> value.trim().lowercase(Locale.ROOT) }
+            .toSet()
+        return when {
+            markers.any { marker -> marker in MALE_ACTOR_PROFILE_MARKERS } -> JavdbActorGender.Male
+            markers.any { marker -> marker in FEMALE_ACTOR_PROFILE_MARKERS } -> JavdbActorGender.Female
+            else -> JavdbActorGender.Unknown
+        }
     }
 
     internal fun parseActorProfileImageUrl(html: String): String {
@@ -385,7 +423,7 @@ class JavdbScraper(
                     .ifBlank { attributeValue(anchorHtml, "data-title") }
                     .ifBlank { attributeValue(anchorHtml, "alt") }
                 if (slug.isBlank() || name.isBlank() || isNonActorCategory(slug, name)) return@mapNotNull null
-                val gender = actorGender((actorSection ?: html), match.range.last + 1)
+                val gender = actorGender(anchorHtml, (actorSection ?: html), match.range.last + 1)
                 val group = slug.take(2).lowercase(Locale.ROOT)
                 JavdbActor(
                     name = name,
@@ -408,7 +446,16 @@ class JavdbScraper(
      * 1) 只检查当前演员链接之后的短区间，避免串到下一个演员。
      * 2) 明确标记为 male 时丢弃；未知标记仍保留。
      */
-    private fun actorGender(section: String, afterAnchorIndex: Int): JavdbActorGender {
+    private fun actorGender(anchorHtml: String, section: String, afterAnchorIndex: Int): JavdbActorGender {
+        val anchorClasses = attributeValue(anchorHtml, "class")
+            .split(Regex("""\s+"""))
+            .map { value -> value.lowercase(Locale.ROOT) }
+        if (anchorClasses.any { value -> value == "actor-male" || value == "male" }) {
+            return JavdbActorGender.Male
+        }
+        if (anchorClasses.any { value -> value == "actor-female" || value == "female" }) {
+            return JavdbActorGender.Female
+        }
         val tail = section.substring(afterAnchorIndex.coerceIn(0, section.length))
         val marker = GENDER_MARKER.find(tail.take(GENDER_LOOKAHEAD_CHARS))
             ?.groupValues
@@ -615,6 +662,14 @@ class JavdbScraper(
             """^\s*(?:<strong|<span)\b[^>]*class=[\"'][^\"']*\b(female|male)\b[^\"']*[\"'][^>]*>""",
             RegexOption.IGNORE_CASE
         )
+        private val ACTOR_PROFILE_METADATA = Regex(
+            """<span\b[^>]+class=[\"'][^\"']*\bsection-meta\b[^\"']*[\"'][^>]*>([\s\S]*?)</span>""",
+            RegexOption.IGNORE_CASE
+        )
+        private val MALE_ACTOR_PROFILE_MARKERS = setOf("男優", "男优", "男演員", "男演员", "male")
+        private val FEMALE_ACTOR_PROFILE_MARKERS = setOf("女優", "女优", "女演員", "女演员", "female")
+        private val ACTOR_PROFILE_ROLE_MARKERS =
+            MALE_ACTOR_PROFILE_MARKERS + FEMALE_ACTOR_PROFILE_MARKERS
         private val REVIEW_LINE_BREAK = Regex("""<br\b[^>]*>""", RegexOption.IGNORE_CASE)
         private val REVIEW_ACTOR_LABEL = Regex(
             """^(?:演員|演员|女優|女优|出演者)\s*[:：]\s*(.+)$""",

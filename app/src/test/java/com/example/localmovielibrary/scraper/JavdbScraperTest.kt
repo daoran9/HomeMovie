@@ -1,5 +1,12 @@
 package com.example.localmovielibrary.scraper
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertThrows
@@ -95,7 +102,8 @@ class JavdbScraperTest {
                 <a href="/actors/male1">男演员甲</a><strong class="symbol male">♂</strong>&nbsp;
                 <a href="/actors/female1">女演员甲</a><strong class="symbol female">♀</strong>&nbsp;
                 <a href="/actors/male2">男演员乙</a><strong class="symbol male">♂</strong>&nbsp;
-                <a href="/actors/female2">女演员乙</a><strong class="symbol female">♀</strong>&nbsp;
+                <a class="actor-female" href="/actors/female2">女演员乙</a>&nbsp;
+                <a href="/actors/unknown">性别未标记演员</a>
               </span>
             </div>
             <div class="panel-block">
@@ -106,11 +114,70 @@ class JavdbScraperTest {
 
         val actors = scraper.parseActors(html)
 
-        assertEquals(listOf("女演员甲", "女演员乙"), actors.map { it.name })
+        assertEquals(listOf("女演员甲", "女演员乙", "性别未标记演员"), actors.map { it.name })
         assertEquals(
-            listOf(JavdbScraper.JavdbActorGender.Female, JavdbScraper.JavdbActorGender.Female),
+            listOf(
+                JavdbScraper.JavdbActorGender.Female,
+                JavdbScraper.JavdbActorGender.Female,
+                JavdbScraper.JavdbActorGender.Unknown
+            ),
             actors.map { it.gender }
         )
+    }
+
+    /*
+     * ================================================================================
+     * 步骤3：验证 JavDB 当前演员性别结构
+     * ================================================================================
+     * 目标：演员链接自身标记女演员、演员主页标记男演员时，只保留女演员。
+     * 数据源：CEMN-003 当前详情页和演员主页的最小 HTML 结构。
+     * 操作：
+     * 1) 用 OkHttp 拦截器回放搜索页、详情页和两个演员主页。
+     * 2) 确认主页的“男優”是性别证据，不进入演员别名。
+     * 3) 无番号、姓名或片商分支，所有影片使用同一解析路径。
+     */
+    @Test
+    fun scrapeExcludesMaleActorFromCurrentLinkAndProfileMarkup() = runBlocking {
+        val pages = mapOf(
+            "/search" to """<a href="/v/pkXZm"><strong>CEMN-003</strong></a>""",
+            "/v/pkXZm" to """
+                <html><head><title>覚醒注意 悔しがり目線。 佐々木あき - JavDB</title></head><body>
+                  <div class="panel-block">
+                    <strong>演員:</strong>
+                    <span class="value">
+                      <a class="actor-female" href="/actors/ZOM6">佐々木あき</a>,
+                      <a href="/actors/d4EaB">市川哲也</a>
+                    </span>
+                  </div>
+                </body></html>
+            """.trimIndent(),
+            "/actors/ZOM6" to """
+                <span class="actor-section-name">佐々木あき</span>
+                <span class="section-meta">180 部影片</span>
+            """.trimIndent(),
+            "/actors/d4EaB" to """
+                <span class="actor-section-name">市川哲也</span>
+                <span class="section-meta">男優, 1904 部影片</span>
+            """.trimIndent()
+        )
+        val client = OkHttpClient.Builder()
+            .addInterceptor { chain ->
+                val html = pages[chain.request().url.encodedPath]
+                    ?: error("Unexpected JavDB test URL: ${chain.request().url}")
+                Response.Builder()
+                    .request(chain.request())
+                    .protocol(Protocol.HTTP_1_1)
+                    .code(200)
+                    .message("OK")
+                    .body(html.toResponseBody("text/html; charset=utf-8".toMediaType()))
+                    .build()
+            }
+            .build()
+        val info = JavdbScraper(client, Dispatchers.Unconfined).scrape("CEMN-003")
+
+        assertEquals(listOf("佐々木あき"), info.actors)
+        assertEquals(listOf("市川哲也"), info.excludedActorNames)
+        assertEquals(emptyMap<String, List<String>>(), info.actorAliases)
     }
 
     @Test
@@ -249,6 +316,12 @@ class JavdbScraperTest {
             "",
             scraper.parseActorProfileImageUrl(
                 """<div class="actor-avatar"><span style="background-image: url(https://c0.jdbstatic.com/images/actor_unknow.jpg)"></span></div>"""
+            )
+        )
+        assertEquals(
+            JavdbScraper.JavdbActorGender.Male,
+            scraper.parseActorProfileGender(
+                """<span class="section-meta">男優, 1904 部影片</span>"""
             )
         )
     }
