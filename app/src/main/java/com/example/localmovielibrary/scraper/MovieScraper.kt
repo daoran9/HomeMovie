@@ -893,6 +893,7 @@ private val ACTOR_NAME_CHAR_VARIANTS = mapOf(
     '丽' to '麗',
     '泽' to '澤',
     '华' to '華',
+    '阶' to '階',
     '兰' to '蘭',
     '龙' to '龍',
     '艳' to '艷',

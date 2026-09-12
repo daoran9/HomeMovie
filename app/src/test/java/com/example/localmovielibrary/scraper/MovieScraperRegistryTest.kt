@@ -1154,6 +1154,35 @@ class MovieScraperRegistryTest {
     }
 
     @Test
+    fun scrapeWithFallbackCoalescesCharacterVariantsBridgedByAnExplicitAlias() = runBlocking {
+        val registry = MovieScraperRegistry(
+            listOf(
+                NamedActorMovieScraper(ScrapeSource.Javlibrary, "二阶堂百合"),
+                InfoMovieScraper(
+                    ScrapeSource.Javdb,
+                    ScrapedMovieInfo(
+                        number = "ABC-123",
+                        title = "标题",
+                        actors = listOf("二階堂ゆり"),
+                        actorAliases = mapOf("二階堂ゆり" to listOf("二階堂百合")),
+                        thumbUrl = "https://images.example/thumb.jpg"
+                    )
+                )
+            )
+        )
+
+        val info = registry.scrapeWithFallback(
+            preferred = ScrapeSource.Javlibrary,
+            number = "ABC-123",
+            fallbackOrder = listOf(ScrapeSource.Javdb),
+            collectAllSources = true
+        )
+
+        assertEquals(listOf("二阶堂百合"), info.actors)
+        assertEquals(listOf("二階堂ゆり"), info.actorAliases["二阶堂百合"])
+    }
+
+    @Test
     fun scrapeWithFallbackKeepsUnconfirmedSingleActorPrefixVariantsSeparate() = runBlocking {
         val registry = MovieScraperRegistry(
             listOf(
