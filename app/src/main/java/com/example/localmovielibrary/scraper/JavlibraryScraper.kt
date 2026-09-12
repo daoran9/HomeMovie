@@ -166,7 +166,6 @@ class JavlibraryScraper(
             actorAliases = cast.associate { actor -> actor.name to actor.aliases }
                 .filterValues { aliases -> aliases.isNotEmpty() },
             genres = genres,
-            tags = genres,
             rating = Regex("""\d+(?:\.\d+)?""").find(score)?.value.orEmpty(),
             website = url,
             source = "javlibrary",

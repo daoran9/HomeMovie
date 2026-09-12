@@ -62,7 +62,6 @@ class JavbusScraper(
             actors = actors,
             actorImageUrls = actorImageUrls,
             genres = genres,
-            tags = genres,
             website = url,
             source = "javbus",
             thumbUrl = coverUrl,

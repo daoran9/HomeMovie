@@ -77,7 +77,7 @@ class MissavScraper(
             directors = splitList(fields["导演"].orEmpty()),
             actors = splitList(fields["女优"].orEmpty()).ifEmpty { splitList(fields["演员"].orEmpty()) },
             genres = splitList(fields["类型"].orEmpty()),
-            tags = splitList(fields["标签"].orEmpty()).ifEmpty { splitList(fields["类型"].orEmpty()) },
+            tags = splitList(fields["标签"].orEmpty()),
             website = url,
             source = "missav",
             thumbUrl = imageSet.thumbUrl,
