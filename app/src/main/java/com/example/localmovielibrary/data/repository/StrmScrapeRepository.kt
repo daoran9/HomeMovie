@@ -35,6 +35,7 @@ import com.example.localmovielibrary.scraper.dmmFanzaActorImageCandidates
 import com.example.localmovielibrary.scraper.isNonActorCategoryName
 import com.example.localmovielibrary.scraper.canonicalizeActorIdentities
 import com.example.localmovielibrary.scraper.prioritizeActorImageUrls
+import com.example.localmovielibrary.scraper.isMovieScopedActorName
 import com.example.localmovielibrary.util.MovieVariant
 import com.example.localmovielibrary.util.detectMovieVariant
 import com.example.localmovielibrary.util.displayNumberWithVariant
@@ -1161,6 +1162,7 @@ class StrmScrapeRepository(
                     .flatMap(::actorNameParts)
                     .filter { alias ->
                         alias.isNotBlank() &&
+                            !info.isMovieScopedActorName(alias) &&
                             !isNonActorCategoryName(alias) &&
                             !alias.sameActorExactly(primaryName)
                     }
@@ -1170,29 +1172,20 @@ class StrmScrapeRepository(
 
             /*
              * ================================================================================
-             * 步骤8.1：强制重匹配前清理历史缓存
+             * 步骤8.1：保留旧头像直到新候选成功
              * ================================================================================
-             * 目标：头像源变更或身份纠错后，不让旧头像继续遮蔽新结果。
+             * 目标：强制刷新尝试新候选，但网络失败不提前清掉已有头像。
              * 数据源：当前演员名、资料源返回的别名和 ActorAvatarStore 本地缓存。
              * 操作：
-             * 1) 先收集本轮可确认的别名。
-             * 2) 删除主名及别名的旧头像，再从本轮来源重新下载。
+             * 1) 强制刷新时不把本地缓存当本次下载成功。
+             * 2) 新图片解码成功后由 saveAvatar 替换旧版本。
              */
             if (forceRefresh) {
-                val staleNames = (listOf(actorName) + loadActorAliases())
-                    .flatMap(::actorNameParts)
-                    .filter { name -> name.isNotBlank() && !isNonActorCategoryName(name) }
-                    .distinctBy { name -> name.normalizedActorName() }
-                val cleared = staleNames.sumOf { name -> actorAvatarStore.clearAvatar(name) }
-                if (cleared > 0) {
-                    changed = true
-                    logStore.append("Cleared stale actor avatars: $actorName, count=$cleared")
-                }
                 saved = false
             }
 
             fun copyExistingAvatarToAliases(aliasNames: Collection<String>, sourceLabel: String) {
-                if (!actorAvatarStore.hasAvatar(actorName) || aliasNames.isEmpty()) return
+                if (!saved || !actorAvatarStore.hasAvatar(actorName) || aliasNames.isEmpty()) return
                 val copied = actorAvatarStore.copyAvatarToNames(
                     sourceActorName = actorName,
                     aliasNames = aliasNames,
@@ -1221,6 +1214,10 @@ class StrmScrapeRepository(
                 runCatching {
                     logStore.append("Download actor avatar: $actorName, source=$sourceLabel")
                     val bytes = imageDownloadService.downloadImageBytes(imageUrl, referer)
+                    val bitmap = android.graphics.BitmapFactory.decodeByteArray(
+                        bytes, 0, bytes.size, android.graphics.BitmapFactory.Options().apply { inSampleSize = 2 }
+                    ) ?: error("演员头像无法解码：$sourceLabel")
+                    bitmap.recycle()
                     val namesToSave = (listOf(actorName) + aliasNames)
                         .flatMap { name -> actorNameVariants(name) }
                         .distinct()
@@ -1345,6 +1342,7 @@ class StrmScrapeRepository(
                 .flatMap(::actorNameParts)
                 .filter { alias ->
                     alias.isNotBlank() &&
+                        !isMovieScopedActorName(alias) &&
                         !isNonActorCategoryName(alias) &&
                     !alias.sameActorExactly(primaryName) &&
                     excludedActorNames.none { excluded -> alias.sameActorExactly(excluded) }
@@ -1357,6 +1355,7 @@ class StrmScrapeRepository(
 
     private fun ScrapedMovieInfo.withLibraryActors(libraryActors: List<String>): ScrapedMovieInfo {
         if (libraryActors.isEmpty()) return this
+        if (actors.isEmpty() && unverifiedActorNames.isNotEmpty()) return this
 
         /*
          * ================================================================================
@@ -1403,6 +1402,7 @@ class StrmScrapeRepository(
 
     private suspend fun ScrapedMovieInfo.withExternalActorsWhenMissing(number: String): ScrapedMovieInfo {
         if (actors.isNotEmpty()) return this
+        if (unverifiedActorNames.isNotEmpty()) return this
         logStore.append("Metadata and library actors empty; query JavLibrary/JavDB: $number")
         val external = runCatching {
             scraperRegistry.scrapeWithFallback(
