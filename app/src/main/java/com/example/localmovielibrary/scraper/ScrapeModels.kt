@@ -32,6 +32,7 @@ data class ScrapedMovieInfo(
     val excludedActorNames: List<String> = emptyList(),
     val actorImageUrls: Map<String, String> = emptyMap(),
     val genres: List<String> = emptyList(),
+    /** Independent source tags only; do not copy genres here. */
     val tags: List<String> = emptyList(),
     val rating: String = "",
     val trailer: String = "",
@@ -40,7 +41,12 @@ data class ScrapedMovieInfo(
     val thumbUrl: String = "",
     val posterUrl: String = "",
     /** 同一演员来自多个资料源的头像候选，按下载优先级排序。 */
-    val actorImageCandidates: Map<String, List<String>> = emptyMap()
+    val actorImageCandidates: Map<String, List<String>> = emptyMap(),
+    /** Verified credits scoped to this movie; never used as global aliases or avatar lookup names. */
+    val actorCredits: Map<String, List<String>> = emptyMap(),
+    val unverifiedActorNames: List<String> = emptyList(),
+    /** Actor names confirmed by a successfully parsed external actor profile. */
+    val verifiedActorNames: List<String> = emptyList()
 )
 
 data class ActorAliasLookup(

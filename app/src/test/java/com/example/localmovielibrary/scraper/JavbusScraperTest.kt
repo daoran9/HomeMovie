@@ -1,10 +1,28 @@
 package com.example.localmovielibrary.scraper
 
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.runBlocking
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Response
+import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Test
 
 class JavbusScraperTest {
+    @Test
+    fun genresAreNotCopiedToTags() = runBlocking {
+        val html = """<h3>ABC-123 Test</h3><span class="genre"><label><a>分類</a></label></span>"""
+        val client = OkHttpClient.Builder().addInterceptor { chain ->
+            Response.Builder().request(chain.request()).protocol(Protocol.HTTP_1_1)
+                .code(200).message("OK").body(html.toResponseBody()).build()
+        }.build()
+        val info = JavbusScraper(client, Dispatchers.Unconfined).scrape("ABC-123")
+        assertEquals(listOf("分類"), info.genres)
+        assertEquals(emptyList<String>(), info.tags)
+    }
+
     @Test
     fun parseActorImageUrlsDoesNotBorrowImageFromNextActorBlock() {
         val html = """

@@ -1,6 +1,5 @@
 package com.example.localmovielibrary.scraper
 
-import com.example.localmovielibrary.util.extractMovieNumberInfo
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.withTimeout
@@ -27,8 +26,52 @@ class MovieScraperRegistry(
     private val scrapersBySource = scrapers.associateBy { it.source }
 
     suspend fun scrape(source: ScrapeSource, number: String): ScrapedMovieInfo {
+        /*
+         * ================================================================================
+         * 步骤1：核验手动指定来源的演员证据
+         * ================================================================================
+         * 目标：让手动指定来源与自动刮削共用制作商作品假名边界。
+         * 数据源：用户选定来源返回的影片资料。
+         * 操作：
+         * 1) DMM、DMM2、Official 作为官方演员署名输入。
+         * 2) 其它来源作为外部身份输入。
+         * 3) 身份未核时保留影片资料，只移除未确认演员及其头像。
+         */
+        logger?.invoke("手动来源演员证据核验开始：number=$number, source=${source.name}")
+
+        // 1.1 获取用户指定来源的原始结果
         val scraper = scrapersBySource[source] ?: error("Unsupported scrape source: $source")
-        return scraper.scrape(number)
+        val info = scraper.scrape(number)
+
+        // 1.2 按来源职责传入官方署名或外部身份槽位
+        val review = if (source in setOf(ScrapeSource.Dmm, ScrapeSource.Dmm2, ScrapeSource.Official)) {
+            reviewMakerActorEvidence(listOf(info), emptyList())
+        } else {
+            reviewMakerActorEvidence(emptyList(), listOf(info))
+        }
+
+        // 1.3 未核演员被移除时仍保留标题、厂商及其它影片字段
+        val actorEvidence = review.infos.singleOrNull() ?: info.copy(
+            actors = emptyList(),
+            actorAliases = emptyMap(),
+            actorImageUrls = emptyMap(),
+            actorImageCandidates = emptyMap(),
+            actorCredits = emptyMap(),
+            verifiedActorNames = emptyList()
+        )
+        val creditActors = actorEvidence.actorCredits.keys + review.credits.keys
+        val result = actorEvidence.copy(
+            actorCredits = creditActors.associateWith { actor ->
+                (actorEvidence.actorCredits[actor].orEmpty() + review.credits[actor].orEmpty()).distinct()
+            },
+            unverifiedActorNames = (actorEvidence.unverifiedActorNames + review.unverifiedNames).distinct()
+        ).canonicalizeActorIdentities()
+
+        logger?.invoke(
+            "手动来源演员证据核验结束：number=$number, source=${source.name}, " +
+                "actors=${result.actors.size}, pending=${result.unverifiedActorNames.size}"
+        )
+        return result
     }
 
     /*
@@ -63,7 +106,12 @@ class MovieScraperRegistry(
             return try {
                 // 2.1 每个来源独立限时，失败后由当前分支决定是否继续。
                 val info = withTimeout(timeout.coerceAtLeast(1_000L)) {
-                    scraper.scrape(number)
+                    if (scraper is DmmScraper) {
+                        scraper.scrape(number, collected.firstOrNull { it.source == ScrapeSource.Dmm2 }?.info,
+                            allowDigital = ScrapeSource.Dmm2 !in excludedSources)
+                    } else {
+                        scraper.scrape(number)
+                    }
                 }
                 collected += CollectedSource(source, info)
                 logger?.invoke("自动刮削源成功：number=$number, source=${source.name}")
@@ -88,54 +136,18 @@ class MovieScraperRegistry(
          * ================================================================================
          * 步骤3：处理官方命中分支
          * ================================================================================
-         * 目标：DMM/FANZA 命中后保留官方影片资料；MSAJ 演员以 JavLibrary 为准。
+         * 目标：保留同商品官方影片资料，外部来源按字段补缺。
          * 数据源：DMM2 详情和旧 DMM 详情。
          * 操作：
-         * 1) DMM/FANZA 或旧 DMM 成功即视为严格番号命中。
-         * 2) 两者都属于官方资料，完整合并各自确认的演员、别名和头像证据。
-         * 3) MSAJ 额外读取 JavLibrary 演员，非空时只替换演员和别名。
+         * 1) DMM2 成功时保持官方影片字段优先。
+         * 2) 旧 DMM 命中也保持有效官方字段，不再整组降级。
+         * 3) 两个 DMM 来源都参与演员、别名和头像证据融合。
         */
         val dmm2Info = collect(ScrapeSource.Dmm2)
         val dmmInfo = collect(ScrapeSource.Dmm)
         if (dmm2Info != null || dmmInfo != null) {
             // 3.1 DMM2 保持字段优先级，旧 DMM 只补全同一官方家族的缺失证据。
             var merged = mergeInfos(listOfNotNull(dmm2Info, dmmInfo))
-
-            /*
-             * ================================================================================
-             * 步骤4：校准 MSAJ 系列演员
-             * ================================================================================
-             * 目标：修正官方详情中不对应的演员，同时保留 DMM/FANZA 的影片字段。
-             * 数据源：当前番号对应的 JavLibrary 演员和显式 alias。
-             * 操作：
-             * 1) 只按系列前缀识别 MSAJ，不按单部影片写特例。
-             * 2) JavLibrary 演员非空时替换演员与别名，并重新归并身份。
-             * 3) JavLibrary 无演员或请求失败时保留官方演员。
-             */
-            if (usesJavlibraryActorAuthority(number)) {
-                logger?.invoke("开始校准 MSAJ 演员：number=$number, source=Javlibrary")
-
-                // 4.1 只读取 JavLibrary 演员，不进入 JavBus/JavDB 影片资料融合。
-                val javlibraryInfo = collect(ScrapeSource.Javlibrary)
-                if (javlibraryInfo?.actors?.isNotEmpty() == true) {
-                    // 4.2 影片字段继续使用官方结果，演员身份和头像证据使用 JavLibrary 结果。
-                    val actorEvidence = mergeInfos(listOf(merged, javlibraryInfo))
-                    merged = merged.copy(
-                        actors = javlibraryInfo.actors,
-                        actorAliases = javlibraryInfo.actorAliases,
-                        excludedActorNames = actorEvidence.excludedActorNames,
-                        actorImageUrls = actorEvidence.actorImageUrls,
-                        actorImageCandidates = actorEvidence.actorImageCandidates
-                    ).canonicalizeActorIdentities()
-                    logger?.invoke(
-                        "MSAJ 演员已按 JavLibrary 校准：number=$number, " +
-                            "actors=${merged.actors.joinToString("/")}"
-                    )
-                } else {
-                    logger?.invoke("MSAJ JavLibrary 无可用演员，保留 DMM/FANZA 演员：number=$number")
-                }
-                logger?.invoke("MSAJ 演员校准结束：number=$number")
-            }
 
             /*
              * ================================================================================
@@ -146,7 +158,7 @@ class MovieScraperRegistry(
              * 操作：
              * 1) 三个外部来源都要查询，不能用官方演员数量推断名单完整。
              * 2) 官方标题仅含演员名时，标题只接受 JavBus/JavLibrary 的完整结果。
-             * 3) 影片简介只接受 JavBus/JavLibrary，已有官方简介保持不变。
+             * 3) 简介和空日期、年份、时长只接受 JavBus/JavLibrary；已有 DMM2 值保持不变。
              * 4) JavDB 只参与演员、别名和演员头像融合。
              */
             logger?.invoke("官方演员和缺失资料补证开始：number=$number")
@@ -157,16 +169,32 @@ class MovieScraperRegistry(
             val safeExternalEvidence = collected
                 .filter { it.source in SAFE_METADATA_FALLBACK_SOURCES }
                 .map { it.info }
+
+            // Official values remain primary; JL/JB supply missing fields and additional classifications.
+            val officialInfos = listOfNotNull(dmm2Info, dmmInfo)
+            val officialPlot = merged.plot.ifBlank { merged.outline }
+            val officialOutline = merged.outline.ifBlank { merged.plot }
+            merged = mergeInfos(officialInfos + safeExternalEvidence).copy(
+                plot = officialPlot,
+                outline = officialOutline,
+                // Cross-site score scales are not interchangeable; keep the existing official scale.
+                rating = merged.rating
+            )
             val javdbActorEvidence = collected
                 .filter { it.source == ScrapeSource.Javdb }
                 .map { it.info }
             val externalActorEvidence = safeExternalEvidence + javdbActorEvidence
-            if (externalActorEvidence.isNotEmpty()) {
-                val actorEvidence = mergeInfos(listOf(merged, mergeInfos(externalActorEvidence)))
+            run {
+                val review = reviewMakerActorEvidence(officialInfos, externalActorEvidence)
+                val actorEvidence = if (review.infos.isEmpty()) ScrapedMovieInfo(number, "") else mergeInfos(review.infos)
+                if (review.unverifiedNames.isNotEmpty()) {
+                    logger?.invoke("制作商作品署名待核：number=$number, maker=${merged.studio}, names=${review.unverifiedNames.joinToString("/")}")
+                }
                 val narrativeEvidence = listOf(ScrapeSource.Javbus, ScrapeSource.Javlibrary)
                     .mapNotNull { source -> collected.firstOrNull { it.source == source }?.info }
+                val versionMatchedExternal = safeExternalEvidence.filter { haveCompatibleMovieEditions(officialInfos.first(), it) }
 
-                // 5.1 只把“标题等于演员名”视为官方标题不完整，避免覆盖正常官方标题。
+                // 5.2 只把“标题等于演员名”视为官方标题不完整，避免覆盖正常官方标题。
                 val officialTitleVariants = actorNameVariants(merged.title)
                 val knownActorVariants = buildSet {
                     actorEvidence.actors.flatMapTo(this, ::actorNameVariants)
@@ -175,7 +203,7 @@ class MovieScraperRegistry(
                 val officialTitleIsActorOnly = officialTitleVariants.isNotEmpty() &&
                     officialTitleVariants.all(knownActorVariants::contains)
 
-                // 5.2 替换标题时排除同样只有演员名的外部结果。
+                // 5.3 替换标题时排除同样只有演员名的外部结果。
                 val replacementTitle = if (officialTitleIsActorOnly) {
                     narrativeEvidence.firstNotNullOfOrNull { info ->
                         info.title.takeIf { title ->
@@ -190,13 +218,22 @@ class MovieScraperRegistry(
                 if (replacementTitle != null) {
                     logger?.invoke("官方标题仅为演员名，改用外部完整标题：number=$number")
                 }
+                val releaseDate = merged.premiered.ifBlank {
+                    versionMatchedExternal.firstNotNullOfOrNull { it.premiered.takeIf(String::isNotBlank) }.orEmpty()
+                }
                 merged = merged.copy(
                     title = replacementTitle ?: merged.title,
                     originalTitle = replacementTitle ?: merged.originalTitle,
+                    premiered = releaseDate,
+                    year = Regex("""^\d{4}""").find(releaseDate)?.value ?: merged.year,
+                    runtime = merged.runtime.ifBlank { versionMatchedExternal.firstNotNullOfOrNull { it.runtime.takeIf(String::isNotBlank) }.orEmpty() },
                     plot = merged.plot.ifBlank { narrativeEvidence.firstNotNullOfOrNull { it.plot.takeIf(String::isNotBlank) }.orEmpty() },
                     outline = merged.outline.ifBlank { narrativeEvidence.firstNotNullOfOrNull { it.outline.takeIf(String::isNotBlank) }.orEmpty() },
                     actors = actorEvidence.actors,
                     actorAliases = actorEvidence.actorAliases,
+                    actorCredits = review.credits,
+                    unverifiedActorNames = review.unverifiedNames,
+                    verifiedActorNames = actorEvidence.verifiedActorNames,
                     excludedActorNames = actorEvidence.excludedActorNames,
                     actorImageUrls = actorEvidence.actorImageUrls,
                     actorImageCandidates = actorEvidence.actorImageCandidates
@@ -239,13 +276,6 @@ class MovieScraperRegistry(
             fun firstNonBlank(infos: List<ScrapedMovieInfo>, selector: (ScrapedMovieInfo) -> String): String =
                 infos.asSequence().map(selector).firstOrNull { it.isNotBlank() }.orEmpty()
 
-            fun mergedValues(selector: (ScrapedMovieInfo) -> List<String>): List<String> =
-                safeMetadataResults
-                .flatMap(selector)
-                .map { it.trim() }
-                .filter { it.isNotBlank() && !isNonActorCategoryName(it) }
-                .distinct()
-
             val narrativeResults = listOf(ScrapeSource.Javbus, ScrapeSource.Javlibrary)
                 .mapNotNull { source ->
                     collected.firstOrNull { it.source == source }?.info
@@ -256,17 +286,20 @@ class MovieScraperRegistry(
                 ?.rating
                 .orEmpty()
             val safeMetadata = mergeInfos(safeMetadataResults)
-            val actorEvidence = mergeInfos(safeMetadataResults + javdbActorEvidence)
+            val review = reviewMakerActorEvidence(emptyList(), safeMetadataResults + javdbActorEvidence)
+            val actorEvidence = mergeInfos(review.infos)
             var result = safeMetadata.copy(
                 plot = firstNonBlank(narrativeResults) { it.plot },
                 outline = firstNonBlank(narrativeResults) { it.outline },
                 actors = actorEvidence.actors,
                 actorAliases = actorEvidence.actorAliases,
+                actorCredits = review.credits,
+                verifiedActorNames = actorEvidence.verifiedActorNames,
                 excludedActorNames = actorEvidence.excludedActorNames,
                 actorImageUrls = actorEvidence.actorImageUrls,
                 actorImageCandidates = actorEvidence.actorImageCandidates,
-                genres = mergedValues { it.genres },
-                tags = mergedValues { it.tags },
+                genres = safeMetadata.genres,
+                tags = safeMetadata.tags,
                 rating = javlibraryRating
             ).canonicalizeActorIdentities()
             result = result.withReviewActorsWhenStructuredSourcesMissing(
@@ -390,10 +423,25 @@ class MovieScraperRegistry(
 
     private fun mergeInfos(infos: List<ScrapedMovieInfo>): ScrapedMovieInfo {
         val primary = infos.first()
-        fun firstNonBlank(selector: (ScrapedMovieInfo) -> String): String =
-            infos.asSequence().map(selector).firstOrNull { it.isNotBlank() }.orEmpty()
-        fun firstList(selector: (ScrapedMovieInfo) -> List<String>): List<String> =
-            infos.asSequence().map(selector).firstOrNull { it.isNotEmpty() }.orEmpty()
+        val selectedSources = linkedMapOf<String, String>()
+        val conflictingFields = mutableListOf<String>()
+        fun firstNonBlank(field: String, selector: (ScrapedMovieInfo) -> String, versioned: Boolean = false): String {
+            val candidates = infos.filter { !versioned || haveCompatibleMovieEditions(primary, it) }
+                .filter { selector(it).isNotBlank() }
+            val selected = candidates.firstOrNull() ?: return ""
+            selectedSources[field] = selected.source.ifBlank { "unknown" }
+            if (candidates.map(selector).distinct().size > 1) conflictingFields += field
+            return selector(selected)
+        }
+
+        val classifications = mergeMovieClassifications(infos)
+        val directors = mergeDirectorCredits(infos)
+        if (infos.flatMap { it.directors }.any { it.trim().isNotEmpty() && it.trim() !in directors }) {
+            conflictingFields += "directors"
+        }
+        if (infos.any { !haveCompatibleMovieEditions(primary, it) }) {
+            logger?.invoke("不同发行类型不互补日期、片长、评分、预告和图片：number=${primary.number}")
+        }
 
         val mergedActors = mergeActors(infos)
         val actors = mergedActors.names
@@ -420,35 +468,39 @@ class MovieScraperRegistry(
         }.toMap()
         val actorImages = actorImageCandidates.mapValues { (_, candidates) -> candidates.first() }
 
-        return primary.copy(
-            number = firstNonBlank { it.number },
-            title = firstNonBlank { it.title },
-            originalTitle = firstNonBlank { it.originalTitle },
-            plot = firstNonBlank { it.plot },
-            outline = firstNonBlank { it.outline },
-            year = firstNonBlank { it.year },
-            premiered = firstNonBlank { it.premiered },
-            runtime = firstNonBlank { it.runtime },
-            studio = firstNonBlank { it.studio },
-            publisher = firstNonBlank { it.publisher },
-            series = firstNonBlank { it.series },
-            directors = firstList { it.directors },
+        val result = primary.copy(
+            number = primary.number,
+            title = firstNonBlank("title", { it.title }),
+            originalTitle = firstNonBlank("originalTitle", { it.originalTitle }),
+            plot = firstNonBlank("plot", { it.plot }),
+            outline = firstNonBlank("outline", { it.outline }),
+            year = firstNonBlank("year", { it.year }, versioned = true),
+            premiered = firstNonBlank("premiered", { it.premiered }, versioned = true),
+            runtime = firstNonBlank("runtime", { it.runtime }, versioned = true),
+            studio = firstNonBlank("studio", { it.studio }),
+            publisher = firstNonBlank("publisher", { it.publisher }),
+            series = firstNonBlank("series", { it.series }),
+            directors = directors,
             actors = actors,
             actorAliases = actorAliases,
+            verifiedActorNames = infos.flatMap { it.verifiedActorNames }
+                .distinctBy { actorNameVariants(it).sorted().joinToString("|") },
             excludedActorNames = infos.flatMap { it.excludedActorNames }
                 .filter { it.isNotBlank() }
                 .distinctBy { actorNameVariants(it).sorted().joinToString("|") },
             actorImageUrls = actorImages,
             actorImageCandidates = actorImageCandidates,
-            genres = firstList { it.genres },
-            tags = firstList { it.tags },
-            rating = firstNonBlank { it.rating },
-            trailer = firstNonBlank { it.trailer },
-            website = firstNonBlank { it.website },
+            genres = classifications.genres,
+            tags = classifications.tags,
+            rating = firstNonBlank("rating", { it.rating }, versioned = true),
+            trailer = firstNonBlank("trailer", { it.trailer }, versioned = true),
+            website = primary.website,
             source = primary.source.ifBlank { infos.drop(1).firstOrNull()?.source.orEmpty() },
-            thumbUrl = firstNonBlank { it.thumbUrl },
-            posterUrl = firstNonBlank { it.posterUrl }
+            thumbUrl = firstNonBlank("thumb", { it.thumbUrl }, versioned = true),
+            posterUrl = firstNonBlank("poster", { it.posterUrl }, versioned = true)
         ).canonicalizeActorIdentities()
+        logger?.invoke("候选字段选择：number=${primary.number}, selected=$selectedSources, differences=${conflictingFields.joinToString()}")
+        return result
     }
 
     /*
@@ -485,8 +537,6 @@ class MovieScraperRegistry(
         }
 
         records.mergeSharedImageRecords()
-        records.mergeSingleActorConsensusRecords(sourceActors)
-        records.mergeLikelyAliasRecords(sourceActors)
 
         val result = MergedActorList(
             names = records.map { actor -> actor.name },
@@ -562,46 +612,6 @@ class MovieScraperRegistry(
         }
     }
 
-    /*
-     * ================================================================================
-     * 步骤5：按多源单演员共识合并艺名
-     * ================================================================================
-     * 目标：处理 DMM 与外部资料源使用完全不同艺名、但影片页均确认仅有一位女演员的情况。
-     * 数据源：至少三份同番号详情页的演员列表。
-     * 操作：
-     * 1) 只统计实际解析出演员的资料源；空演员字段不能否定其它源的一致结论。
-     * 2) 一个名字必须获得至少两份独立资料源支持，另一名字由剩余来源支持。
-     * 3) 不满足三源共识时保留独立演员，交给显式 alias 或共享头像规则处理。
-     */
-    private fun MutableList<MergedActor>.mergeSingleActorConsensusRecords(
-        sourceActors: List<List<ActorIdentity>>
-    ) {
-        val actorBearingSourceIndexes = sourceActors.indices
-            .filter { index -> sourceActors[index].isNotEmpty() }
-        if (
-            size != 2 ||
-            actorBearingSourceIndexes.size < 3 ||
-            actorBearingSourceIndexes.any { index -> sourceActors[index].size != 1 }
-        ) return
-        val left = this[0]
-        val right = this[1]
-        val leftSources = actorBearingSourceIndexes.filter { index ->
-            sourceActors[index].single().names.any { sourceName ->
-                left.identityNames().any { known -> actorNamesHaveExactVariant(known, sourceName) }
-            }
-        }
-        val rightSources = actorBearingSourceIndexes.filter { index ->
-            sourceActors[index].single().names.any { sourceName ->
-                right.identityNames().any { known -> actorNamesHaveExactVariant(known, sourceName) }
-            }
-        }
-        val allSourcesAreCovered = (leftSources + rightSources).distinct().size == actorBearingSourceIndexes.size
-        if (!allSourcesAreCovered || maxOf(leftSources.size, rightSources.size) < 2) return
-
-        logger?.invoke("按三源单演员共识归并：${left.name} <- ${right.name}")
-        left.merge(right)
-        removeAt(1)
-    }
 
     private fun MutableList<MergedActor>.mergeExactActor(actor: ActorIdentity) {
         val exactMatches = filter { record -> record.hasExactName(actor) }
@@ -619,89 +629,6 @@ class MovieScraperRegistry(
         canonical.merge(actor)
     }
 
-    /*
-     * ================================================================================
-     * 步骤3：按多源共识合并短名与全名
-     * ================================================================================
-     * 目标：处理“宇流木さら / 宇流木さらら”这类来源没有显式 alias 节点的同一演员。
-     * 数据源：至少两个独立资料源；多人资料源还必须共享一个已确认的其它演员。
-     * 操作：
-     * 1) 只接受一方是另一方前缀或后缀、且长度差不超过两个字符的姓名。
-     * 2) 要求两种姓名分别得到至少一个独立来源支持，避免按列表位置猜测。
-     * 3) 保留先出现的来源姓名为主名，其余姓名写入 alias。
-     */
-    private fun MutableList<MergedActor>.mergeLikelyAliasRecords(
-        sourceActors: List<List<ActorIdentity>>
-    ) {
-        var changed = true
-        while (changed) {
-            changed = false
-            outer@ for (leftIndex in indices) {
-                for (rightIndex in (leftIndex + 1) until size) {
-                    val left = this[leftIndex]
-                    val right = this[rightIndex]
-                    if (!left.hasLikelyAliasVariant(right)) continue
-                    val leftSources = sourceActors.indices.filter { index ->
-                        sourceActors[index].any { sourceActor ->
-                            left.identityNames().any { known ->
-                                sourceActor.names.any { sourceName ->
-                                    actorNamesHaveExactVariant(known, sourceName)
-                                }
-                            }
-                        }
-                    }
-                    val rightSources = sourceActors.indices.filter { index ->
-                        sourceActors[index].any { sourceActor ->
-                            right.identityNames().any { known ->
-                                sourceActor.names.any { sourceName ->
-                                    actorNamesHaveExactVariant(known, sourceName)
-                                }
-                            }
-                        }
-                    }
-                    if (leftSources.isEmpty() || rightSources.isEmpty()) continue
-                    val distinctSources = (leftSources + rightSources).distinct()
-                    if (distinctSources.size < 2) continue
-                    val allSourcesAreSingleActor = distinctSources.all { index -> sourceActors[index].size == 1 }
-                    if (!allSourcesAreSingleActor && !hasSharedAnchor(left, right, sourceActors, leftSources, rightSources)) {
-                        continue
-                    }
-                    logger?.invoke("按多源演员身份归并：${left.name} <- ${right.name}")
-                    left.merge(right)
-                    removeAt(rightIndex)
-                    changed = true
-                    break@outer
-                }
-            }
-        }
-    }
-
-    private fun MutableList<MergedActor>.hasSharedAnchor(
-        left: MergedActor,
-        right: MergedActor,
-        sourceActors: List<List<ActorIdentity>>,
-        leftSources: List<Int>,
-        rightSources: List<Int>
-    ): Boolean = leftSources.any { leftIndex ->
-        rightSources.any { rightIndex ->
-            if (leftIndex == rightIndex) return@any false
-            val leftSource = sourceActors[leftIndex]
-            val rightSource = sourceActors[rightIndex]
-            any { anchor ->
-                anchor !== left && anchor !== right &&
-                    leftSource.any { sourceActor ->
-                        sourceActor.names.any { sourceName ->
-                            anchor.identityNames().any { known -> actorNamesHaveExactVariant(known, sourceName) }
-                        }
-                    } &&
-                    rightSource.any { sourceActor ->
-                        sourceActor.names.any { sourceName ->
-                            anchor.identityNames().any { known -> actorNamesHaveExactVariant(known, sourceName) }
-                        }
-                    }
-            }
-        }
-    }
 
     private data class MergedActorList(
         val names: List<String> = emptyList(),
@@ -729,10 +656,6 @@ class MovieScraperRegistry(
         fun identityNames(): List<String> = knownNames.toList()
 
         fun imageKeys(): Set<String> = knownImageKeys.toSet()
-
-        fun hasLikelyAliasVariant(other: MergedActor): Boolean = knownNames.any { left ->
-            other.knownNames.any { right -> actorNamesHaveLikelyAliasVariant(left, right) }
-        }
 
         fun merge(candidate: ActorIdentity) {
             mergeNames(candidate.names)
@@ -794,7 +717,7 @@ class MovieScraperRegistry(
         number: String,
         structuredInfos: List<ScrapedMovieInfo>
     ): ScrapedMovieInfo {
-        if (actors.isNotEmpty() || structuredInfos.any { info -> info.actors.isNotEmpty() }) return this
+        if (actors.isNotEmpty() || unverifiedActorNames.isNotEmpty() || structuredInfos.any { info -> info.actors.isNotEmpty() }) return this
         val fallback = scrapersBySource[ScrapeSource.Javdb] as? ReviewActorFallback ?: return this
         logger?.invoke("全部结构化来源无演员，开始读取短评姓名清单：number=$number")
         val reviewActors = try {
@@ -830,7 +753,6 @@ class MovieScraperRegistry(
     }
 
     private companion object {
-        const val JAVLIBRARY_ACTOR_AUTHORITY_SERIES = "MSAJ"
         val SAFE_METADATA_FALLBACK_SOURCES = setOf(
             ScrapeSource.Javlibrary,
             ScrapeSource.Javbus
@@ -847,12 +769,6 @@ class MovieScraperRegistry(
         const val DMM2_SOURCE_TIMEOUT_MS = 20_000L
         const val WEBVIEW_SOURCE_TIMEOUT_MS = 70_000L
     }
-
-    private fun usesJavlibraryActorAuthority(number: String): Boolean =
-        extractMovieNumberInfo(number)
-            ?.number
-            ?.substringBefore('-')
-            ?.equals(JAVLIBRARY_ACTOR_AUTHORITY_SERIES, ignoreCase = true) == true
 
 }
 
@@ -930,6 +846,7 @@ internal fun isOfficialDmmActorImageUrl(url: String): Boolean {
 internal fun prioritizeActorImageUrls(urls: Collection<String>): List<String> = urls.asSequence()
     .map(String::trim)
     .filter { it.isNotBlank() && !it.equals("null", ignoreCase = true) }
+    .filterNot { Regex("now[_-]?printing|no[_-]?(?:image|photo)|placeholder", RegexOption.IGNORE_CASE).containsMatchIn(it) }
     .distinct()
     .sortedBy(::actorImageUrlPriority)
     .toList()
@@ -1093,7 +1010,7 @@ internal fun ScrapedMovieInfo.withSupplementalActors(supplementalActors: List<St
 
     supplementalActors.forEach { rawActor ->
         val parts = actorNameParts(rawActor).filter { part ->
-            !isNonActorCategoryName(part) &&
+            !isMovieScopedActorName(part) && !isNonActorCategoryName(part) &&
                 excludedActorNames.none { excluded -> actorNamesHaveExactVariant(excluded, part) }
         }
         val primaryName = parts.firstOrNull().orEmpty()
@@ -1138,13 +1055,13 @@ internal fun ScrapedMovieInfo.canonicalizeActorIdentities(): ScrapedMovieInfo {
         .flatMap { (_, aliases) -> aliases.flatMap(::actorNameParts) }
 
     actors.forEach { rawActor ->
-        val parts = actorNameParts(rawActor).filterNot(::isNonActorCategoryName)
+        val parts = actorNameParts(rawActor).filterNot(::isNonActorCategoryName).filterNot(::isMovieScopedActorName)
         val primaryName = parts.firstOrNull() ?: return@forEach
         if (excludedActorNames.any { excluded -> actorNamesHaveExactVariant(excluded, primaryName) }) return@forEach
         val names = (parts + aliasesFor(rawActor))
             .filter {
                 it.isNotBlank() &&
-                    !isNonActorCategoryName(it) &&
+                    !isMovieScopedActorName(it) && !isNonActorCategoryName(it) &&
                     excludedActorNames.none { excluded -> actorNamesHaveExactVariant(excluded, it) }
             }
             .distinctBy { actorNameVariants(it).sorted().joinToString("|") }
@@ -1168,6 +1085,7 @@ internal fun ScrapedMovieInfo.canonicalizeActorIdentities(): ScrapedMovieInfo {
         } ?: return@forEach
         aliases.flatMap(::actorNameParts)
             .filterNot(::isNonActorCategoryName)
+            .filterNot(::isMovieScopedActorName)
             .filterNot { alias -> excludedActorNames.any { excluded -> actorNamesHaveExactVariant(excluded, alias) } }
             .forEach { alias ->
                 val duplicate = records.firstOrNull { record ->
@@ -1203,11 +1121,18 @@ internal fun ScrapedMovieInfo.canonicalizeActorIdentities(): ScrapedMovieInfo {
         candidates.takeIf { it.isNotEmpty() }?.let { imageUrls -> record.name to imageUrls }
     }.toMap()
     val canonicalImages = canonicalImageCandidates.mapValues { (_, candidates) -> candidates.first() }
+    val canonicalCredits = records.mapNotNull { record ->
+        val credits = actorCredits.filterKeys { stored ->
+            record.knownNames.any { actorNamesHaveExactVariant(it, stored) }
+        }.values.flatten().distinct()
+        credits.takeIf { it.isNotEmpty() }?.let { record.name to it }
+    }.toMap()
     return copy(
         actors = records.map { it.name },
         actorAliases = canonicalAliases,
         actorImageUrls = canonicalImages,
-        actorImageCandidates = canonicalImageCandidates
+        actorImageCandidates = canonicalImageCandidates,
+        actorCredits = canonicalCredits
     )
 }
 

@@ -93,6 +93,7 @@ class JavlibraryScraperTest {
         assertEquals("120", info.runtime)
         assertEquals(listOf("演员甲", "演员乙"), info.actors)
         assertEquals(listOf("剧情", "办公室"), info.genres)
+        assertTrue(info.tags.isEmpty())
         assertEquals("7.8", info.rating)
         assertTrue(info.actorImageUrls.isEmpty())
     }

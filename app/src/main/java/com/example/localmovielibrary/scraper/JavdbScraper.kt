@@ -61,8 +61,8 @@ class JavdbScraper(
             ?: error("JavDB 没有搜索到详情页：$normalized")
         logger?.invoke("JavDB 找到详情页：$detailUrl")
         val detailHtml = fetch(detailUrl)
-        val (actors, actorAliases) = resolveActorProfiles(parseActors(detailHtml))
-        parseDetail(normalized, detailUrl, detailHtml, actors, actorAliases)
+        val resolved = resolveActorProfiles(parseActors(detailHtml))
+        parseDetail(normalized, detailUrl, detailHtml, resolved.actors, resolved.aliases, resolved.verifiedNames)
     }
 
     private fun buildSearchUrl(number: String): String =
@@ -103,7 +103,8 @@ class JavdbScraper(
         url: String,
         html: String,
         resolvedActors: List<JavdbActor>? = null,
-        resolvedActorAliases: Map<String, List<String>> = emptyMap()
+        resolvedActorAliases: Map<String, List<String>> = emptyMap(),
+        verifiedActorNames: List<String> = emptyList()
     ): ScrapedMovieInfo {
         val detailNumber = parseDetailNumber(html)
         if (detailNumber.isNotBlank() && !containsExactCatalogNumber(detailNumber, normalizeNumber(number))) {
@@ -152,10 +153,10 @@ class JavdbScraper(
             directors = parseLinksNearLabel(html, "导演", "導演"),
             actors = actors.map { it.name },
             actorAliases = resolvedActorAliases,
+            verifiedActorNames = verifiedActorNames,
             excludedActorNames = excludedActorNames,
             actorImageUrls = actorImageUrls,
             genres = genres,
-            tags = genres,
             website = url,
             source = "javdb",
             thumbUrl = cover,
@@ -251,12 +252,11 @@ class JavdbScraper(
      * 3) 主页显示未知头像或没有头像时清空猜测地址，交给其它头像源继续补齐。
      * 4) 去掉当前显示名后，把其余名字作为显式 alias 交给多源融合。
      */
-    private suspend fun resolveActorProfiles(
-        actors: List<JavdbActor>
-    ): Pair<List<JavdbActor>, Map<String, List<String>>> {
-        if (actors.isEmpty() || actors.size > ACTOR_PROFILE_ALIAS_LIMIT) return actors to emptyMap()
+    private suspend fun resolveActorProfiles(actors: List<JavdbActor>): ResolvedActorProfiles {
+        if (actors.isEmpty() || actors.size > ACTOR_PROFILE_ALIAS_LIMIT) return ResolvedActorProfiles(actors)
         logger?.invoke("JavDB 演员主页证据查询开始：${actors.size} 人")
         val aliases = mutableMapOf<String, List<String>>()
+        val verifiedNames = mutableListOf<String>()
         val resolvedActors = actors.map { actor ->
             if (actor.profileUrl.isBlank()) return@map actor
             val profileHtml = try {
@@ -269,6 +269,9 @@ class JavdbScraper(
             }
             if (profileHtml == null) return@map actor
             val profileNames = parseActorProfileNames(profileHtml)
+            if (profileNames.any { name -> actorNamesHaveExactVariant(name, actor.name) }) {
+                verifiedNames += actor.name
+            }
             val actorAliases = profileNames
                 .filter { name -> !actorNamesHaveExactVariant(name, actor.name) }
                 .distinctBy { name -> name.lowercase(Locale.ROOT) }
@@ -276,7 +279,7 @@ class JavdbScraper(
             actor.copy(imageUrl = parseActorProfileImageUrl(profileHtml))
         }
         logger?.invoke("JavDB 演员主页证据查询结束：${resolvedActors.size} 人")
-        return resolvedActors to aliases
+        return ResolvedActorProfiles(resolvedActors, aliases, verifiedNames.distinct())
     }
 
     internal fun parseActorProfileNames(html: String): List<String> {
@@ -589,6 +592,12 @@ class JavdbScraper(
         val imageUrl: String,
         val gender: JavdbActorGender = JavdbActorGender.Unknown,
         val profileUrl: String = ""
+    )
+
+    private data class ResolvedActorProfiles(
+        val actors: List<JavdbActor>,
+        val aliases: Map<String, List<String>> = emptyMap(),
+        val verifiedNames: List<String> = emptyList()
     )
 
     internal enum class JavdbActorGender {

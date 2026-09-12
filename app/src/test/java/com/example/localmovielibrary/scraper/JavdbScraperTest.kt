@@ -9,6 +9,14 @@ class JavdbScraperTest {
     private val scraper = JavdbScraper()
 
     @Test
+    fun genresAreNotCopiedToTags() {
+        val html = """<title>Test - JavDB</title><div>類別:<a>分類</a></div>"""
+        val info = scraper.parseDetail("ABC-123", "https://javdb.com/v/abc", html)
+        assertEquals(listOf("分類"), info.genres)
+        assertEquals(emptyList<String>(), info.tags)
+    }
+
+    @Test
     fun findDetailUrlMatchesExactNumberWithSeparators() {
         val html = """
             <a href="https://www.javlibrary.com/v/not-javdb"><span>ABC-123</span></a>
@@ -209,10 +217,12 @@ class JavdbScraperTest {
             number = "ABC-123",
             url = "https://javdb.com/v/abc",
             html = html,
-            resolvedActors = reviewActors
+            resolvedActors = reviewActors,
+            verifiedActorNames = listOf("演员甲")
         )
 
         assertEquals(listOf("演员甲", "演员乙"), info.actors)
+        assertEquals(listOf("演员甲"), info.verifiedActorNames)
         assertEquals(emptyMap<String, String>(), info.actorImageUrls)
     }
 
