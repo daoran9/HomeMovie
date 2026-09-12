@@ -132,6 +132,113 @@ class MetadataFusionPolicyTest {
         assertTrue(nfo.contains("<name>神谷裕子</name>"))
     }
 
+    @Test fun matchingProfileDoesNotResolveConflictingSingleActorSources() {
+        val image = "https://c0.jdbstatic.com/avatars/credit.jpg"
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(number = "MSAJ-004", studio = "豊彦",
+                actors = listOf("横山早苗"), plot = "Official plot", runtime = "120"),
+            ScrapeSource.Dmm to info().copy(actors = listOf("横山早苗")),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("前澤あきな")),
+            ScrapeSource.Javbus to info("javbus").copy(actors = listOf("横山早苗")),
+            ScrapeSource.Javdb to info("javdb").copy(actors = listOf("横山早苗"),
+                verifiedActorNames = listOf("横山早苗"), actorImageUrls = mapOf("横山早苗" to image))
+        )
+        assertEquals(listOf("前澤あきな"), merged.actors)
+        assertEquals(listOf("横山早苗"), merged.unverifiedActorNames)
+        assertTrue(merged.verifiedActorNames.isEmpty())
+        assertTrue(merged.actorAliases.isEmpty())
+        assertTrue(merged.actorCredits.isEmpty())
+        assertTrue(merged.actorImageUrls.isEmpty())
+        assertEquals("Official plot", merged.plot)
+        assertEquals("120", merged.runtime)
+
+        val refreshed = merged.withSupplementalActors(listOf("横山早苗", "前澤あきな"))
+            .canonicalizeActorIdentities()
+        assertEquals(listOf("前澤あきな"), refreshed.actors)
+        val nfo = NfoWriter.build(refreshed)
+        assertTrue(nfo.contains("<name>前澤あきな</name>"))
+        assertFalse(nfo.contains("<name>横山早苗</name>"))
+        assertFalse(nfo.contains("<role>横山早苗</role>"))
+    }
+
+    @Test fun explicitMappingStillResolvesCreditDespiteMatchingProfile() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("作品署名")),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("確認芸名"),
+                actorAliases = mapOf("確認芸名" to listOf("作品署名"))),
+            ScrapeSource.Javdb to info("javdb").copy(actors = listOf("作品署名"),
+                verifiedActorNames = listOf("作品署名"))
+        )
+        assertEquals(listOf("確認芸名"), merged.actors)
+        assertEquals(mapOf("確認芸名" to listOf("作品署名")), merged.actorCredits)
+        assertTrue(merged.unverifiedActorNames.isEmpty())
+        assertTrue(merged.verifiedActorNames.isEmpty())
+        assertTrue(merged.actorAliases.isEmpty())
+        assertTrue(NfoWriter.build(merged).contains("<role>作品署名</role>"))
+    }
+
+    @Test fun explicitJointCastAllowsPartialListsAndDifferentPublicAliases() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("芸名甲")),
+            ScrapeSource.Javbus to info("javbus").copy(actors = listOf("芸名甲", "芸名乙")),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("芸名乙（旧芸名乙）")),
+            ScrapeSource.Javdb to info("javdb").copy(actors = listOf("芸名甲"),
+                verifiedActorNames = listOf("芸名甲"))
+        )
+        assertEquals(listOf("芸名甲", "芸名乙"), merged.actors)
+        assertTrue(merged.unverifiedActorNames.isEmpty())
+        assertEquals(listOf("旧芸名乙"), merged.actorAliases["芸名乙"])
+    }
+
+    @Test fun officialJointCastAllowsPartialExternalLists() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("芸名甲", "芸名乙")),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("芸名乙")),
+            ScrapeSource.Javdb to info("javdb").copy(actors = listOf("芸名甲", "芸名乙"),
+                verifiedActorNames = listOf("芸名甲", "芸名乙"))
+        )
+        assertEquals(listOf("芸名甲", "芸名乙"), merged.actors)
+        assertTrue(merged.unverifiedActorNames.isEmpty())
+    }
+
+    @Test fun excludedNamesAndEmptySourcesDoNotCreateIdentityConflicts() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("芸名甲")),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("有碼", "除外名")),
+            ScrapeSource.Javbus to info("javbus"),
+            ScrapeSource.Javdb to info("javdb").copy(actors = listOf("芸名甲"),
+                verifiedActorNames = listOf("芸名甲"), excludedActorNames = listOf("除外名"))
+        )
+        assertEquals(listOf("芸名甲"), merged.actors)
+        assertTrue(merged.unverifiedActorNames.isEmpty())
+    }
+
+    @Test fun excludedAliasesCannotEstablishJointCastEvidence() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "豊彦", actors = listOf("芸名甲")),
+            ScrapeSource.Javbus to info("javbus").copy(actors = listOf("芸名甲", "芸名乙"),
+                actorAliases = mapOf("芸名乙" to listOf("除外名"))),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("芸名丙"),
+                actorAliases = mapOf("芸名丙" to listOf("除外名"))),
+            ScrapeSource.Javdb to info("javdb").copy(actors = listOf("芸名甲"),
+                verifiedActorNames = listOf("芸名甲"), excludedActorNames = listOf("除外名"))
+        )
+        assertEquals(listOf("芸名甲"), merged.unverifiedActorNames)
+        assertEquals(setOf("芸名乙", "芸名丙"), merged.actors.toSet())
+        assertTrue(merged.actorAliases.isEmpty())
+    }
+
+    @Test fun conflictingCastRuleDoesNotExpandToOtherMakers() {
+        val merged = fuse(
+            ScrapeSource.Dmm2 to info("dmm2").copy(studio = "Other maker", actors = listOf("芸名甲")),
+            ScrapeSource.Javlibrary to info("javlibrary").copy(actors = listOf("芸名乙")),
+            ScrapeSource.Javdb to info("javdb").copy(actors = listOf("芸名甲"),
+                verifiedActorNames = listOf("芸名甲"))
+        )
+        assertEquals(listOf("芸名甲", "芸名乙"), merged.actors)
+        assertTrue(merged.unverifiedActorNames.isEmpty())
+    }
+
     @Test fun creditImagesCannotBeReboundToStageNames() {
         val review = reviewMakerActorEvidence(
             listOf(info().copy(studio = "豊彦", actors = listOf("署名"))),

@@ -97,8 +97,34 @@ internal fun reviewMakerActorEvidence(
     val credits = creditsByActor.mapValues { (_, names) -> names.distinct() }
     val movieScopedNames = credits.values.flatten()
     val profileVerifiedNames = external.flatMap { info -> info.verifiedActorNames } + credits.keys
+    // A matching profile does not resolve disjoint casts; require explicit joint credits.
+    val excludedNames = (official + external).flatMap { it.excludedActorNames }
+    fun cast(info: ScrapedMovieInfo): List<List<String>> = info.actors
+        .filterNot { actor ->
+            isNonActorCategoryName(actor.primaryActorName()) ||
+                excludedNames.any { actorNamesHaveExactVariant(it, actor.primaryActorName()) }
+        }
+        .map { actor ->
+            (actorNameParts(actor) + info.actorAliases
+                .filterKeys { actorNamesHaveExactVariant(it, actor) }.values.flatten()
+                .flatMap(::actorNameParts)).filterNot { name ->
+                    isNonActorCategoryName(name) ||
+                        excludedNames.any { actorNamesHaveExactVariant(it, name) }
+                }.distinct()
+        }
+    val externalCasts = external.map(::cast)
+    val allCasts = official.map(::cast) + externalCasts
+    fun hasConflictingCast(name: String): Boolean {
+        val jointlyCreditedNames = allCasts.filter { actors ->
+            actors.any { names -> names.any { actorNamesHaveExactVariant(it, name) } }
+        }.flatten().flatten()
+        return externalCasts.flatten().any { names ->
+            names.none { candidate -> jointlyCreditedNames.any { actorNamesHaveExactVariant(it, candidate) } }
+        }
+    }
     val verifiedOfficialNames = officialNames.filter { officialName ->
-        profileVerifiedNames.any { verified -> actorNamesHaveExactVariant(officialName, verified) }
+        profileVerifiedNames.any { verified -> actorNamesHaveExactVariant(officialName, verified) } &&
+            !hasConflictingCast(officialName)
     }
     fun isMovieCredit(name: String): Boolean = movieScopedNames.any { credit ->
         actorNamesHaveExactVariant(credit, name)
@@ -130,7 +156,8 @@ internal fun reviewMakerActorEvidence(
             },
             actorImageCandidates = info.actorImageCandidates.filterKeys { name ->
                 !isMovieCredit(name.primaryActorName()) && !isUnresolved(name.primaryActorName())
-            }
+            },
+            verifiedActorNames = info.verifiedActorNames.filterNot { isMovieCredit(it) || isUnresolved(it) }
         )
     }.filter { info -> info.actors.isNotEmpty() || info.excludedActorNames.isNotEmpty() }
     return ActorEvidenceReview(reviewed, credits, unresolvedNames)
