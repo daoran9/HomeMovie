@@ -43,5 +43,11 @@ class MovieVariantTest {
         assertEquals("-U-4K", playbackSourceSuffixFromText("BF-287-U-4K.mp4"))
         assertEquals("-P3-8K", playbackSourceSuffixFromText("BF-287.part3_8K.mp4"))
         assertEquals("-4K", playbackSourceSuffixFromText("BF-287-UHD.mp4"))
+        assertEquals(
+            "-WM",
+            playbackSourceSuffixFromText("HNDS-005美麗的雙重癡女狂搖不停的騎乘位中出愛咲玲羅竹內紗里奈_002^WM.mp4")
+        )
+        assertEquals("-WM-4K", playbackSourceSuffixFromText("GMRY-001真琴りょう^WM_4K_prob4.mp4"))
+        assertEquals("", playbackSourceSuffixFromText("HNDS-010.restored_KLX.mp4"))
     }
 }

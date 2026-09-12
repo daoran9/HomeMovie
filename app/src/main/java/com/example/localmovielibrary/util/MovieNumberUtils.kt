@@ -117,4 +117,4 @@ private val MOVIE_NUMBER_PATTERN =
     Regex("""(?i)\b([a-z]{2,10})[-_ ]?(\d{2,6})(?:[-_ ]([a-z]))?(?:$|[^a-z0-9])""")
 
 private val PLAYBACK_SOURCE_MARKER_PATTERN =
-    Regex("""(?i)^[._ -]+([a-z]{1,3})(?=$|[^a-z0-9])""")
+    Regex("""(?i)(?:^[._ -]+|\^)([a-z]{1,3})(?=$|[^a-z0-9])""")
