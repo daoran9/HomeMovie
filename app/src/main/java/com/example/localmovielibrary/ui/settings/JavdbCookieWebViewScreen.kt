@@ -1,6 +1,7 @@
 package com.example.localmovielibrary.ui.settings
 
 import android.annotation.SuppressLint
+import android.util.Log
 import android.webkit.CookieManager
 import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebView
@@ -30,7 +31,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
-import com.example.localmovielibrary.playback.DEFAULT_USER_AGENT
+import com.example.localmovielibrary.scraper.JavdbScraper
 import org.json.JSONArray
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -88,13 +89,25 @@ fun JavdbCookieWebViewScreen(
             AndroidView(
                 modifier = Modifier.fillMaxSize(),
                 factory = { context ->
+                    /*
+                     * ================================================================================
+                     * 步骤1：创建适配移动端登录的 JavDB WebView
+                     * ================================================================================
+                     * 目标：让站点按手机视口显示导航和登录菜单，并保持登录与刮削请求的 UA 一致。
+                     * 数据源：Android WebView 和 JavDB 刮削器共用的移动端 User-Agent。
+                     * 操作：
+                     * 1) 启用登录所需的 Cookie、JavaScript 和本地存储。
+                     * 2) 使用 JavDB 移动端 UA 加载主页。
+                     */
+                    Log.i(TAG, "步骤1开始：打开 JavDB 移动端登录页")
                     WebView(context).apply {
+                        // 1.1 启用登录所需的浏览器能力
                         CookieManager.getInstance().setAcceptCookie(true)
                         CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.databaseEnabled = true
-                        settings.userAgentString = DEFAULT_USER_AGENT
+                        settings.userAgentString = JavdbScraper.USER_AGENT
                         webViewClient = object : WebViewClient() {
                             override fun onRenderProcessGone(
                                 view: WebView?,
@@ -125,7 +138,10 @@ fun JavdbCookieWebViewScreen(
                                 }
                             }
                         }
+                        // 1.2 加载 JavDB 移动端主页
                         loadUrl(JAVDB_HOME)
+                    }.also {
+                        Log.i(TAG, "步骤1结束：JavDB 移动端登录页已提交加载")
                     }
                 }
             )
@@ -154,3 +170,4 @@ private fun String.isJavdbGeoBlockedHtml(): Boolean {
 
 private const val JAVDB_HOME = "https://javdb.com"
 private const val JAVDB_WWW = "https://www.javdb.com"
+private const val TAG = "JavdbCookieWebView"
