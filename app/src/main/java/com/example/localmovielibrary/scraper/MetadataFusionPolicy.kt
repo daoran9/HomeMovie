@@ -15,11 +15,16 @@ private val CLASSIFICATION_NAMES = listOf(
 ).flatMap { group -> group.map { it to group.first() } }.toMap()
 
 private val TECHNICAL_TAGS = setOf("高清", "4K", "VR", "VR専用")
-private val SITE_LABELS = setOf("サンプル動画", "サンプル画像", "セール", "期間限定セール")
+private val SITE_LABELS = setOf(
+    "サンプル動画", "サンプル画像", "セール", "期間限定セール", "BIGセール",
+    "アウトレット", "ベストヒッツ", "ベスト"
+)
+
+internal fun isSiteClassification(value: String): Boolean = value in SITE_LABELS
 
 internal fun mergeMovieClassifications(infos: List<ScrapedMovieInfo>): MovieClassifications {
     fun normalize(values: List<String>) = values.map { it.cleanMetadataText().trim() }
-        .filter { it.isNotBlank() && it !in SITE_LABELS }
+        .filter { it.isNotBlank() && !isSiteClassification(it) }
         .map { CLASSIFICATION_NAMES[it] ?: it }.distinct()
     val allGenres = normalize(infos.flatMap { it.genres })
     val allTags = normalize(infos.flatMap { it.tags })

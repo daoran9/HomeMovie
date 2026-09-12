@@ -19,8 +19,8 @@ class MetadataFusionPolicyTest {
 
     @Test fun classificationsMergeUniqueValuesAndSeparateTechnicalTags() {
         val result = mergeMovieClassifications(listOf(
-            info().copy(genres = listOf("乱交", "ハイビジョン", "サンプル動画", "新分類"),
-                tags = listOf("乱交", "ハイビジョン", "サンプル動画", "新分類")),
+            info().copy(genres = listOf("乱交", "ハイビジョン", "サンプル動画", "新分類", "アウトレット"),
+                tags = listOf("乱交", "ハイビジョン", "サンプル動画", "新分類", "ベストヒッツ", "ベスト")),
             info("javbus").copy(genres = listOf("濫交", "独有分类"), tags = listOf("4K"))
         ))
         assertEquals(listOf("滥交", "新分類", "独有分类"), result.genres)

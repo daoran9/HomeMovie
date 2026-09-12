@@ -85,6 +85,39 @@ class DmmRelatedTagsRegressionTest {
         for (route in listOf("web", "reuse")) assertClassifications(capturedInfo(route))
     }
 
+    @Test fun dvdKeywordSectionSupplementsDigitalTagsThroughPriorityFusion() = runBlocking {
+        val html = javaClass.getResource("/dmm/dvd-keywords-mobile.html")!!.readText()
+        val dvd = DmmScraper().parseDetail(
+            html, "https://www.dmm.co.jp/mono/dvd/-/detail/=/cid=h_955kv302/", "KV-302"
+        )
+        val digital = ScrapedMovieInfo(
+            "KV-302", "Digital title", source = "dmm2",
+            tags = listOf("Digital tag", "中出し"), genres = listOf("ハイビジョン"),
+            website = "https://video.dmm.co.jp/av/content/?id=h_955kv00302"
+        )
+        val registry = MovieScraperRegistry(listOf(
+            object : MovieScraper {
+                override val source = ScrapeSource.Dmm2
+                override suspend fun scrape(number: String) = digital
+            },
+            object : MovieScraper {
+                override val source = ScrapeSource.Dmm
+                override suspend fun scrape(number: String) = dvd
+            }
+        ))
+
+        val merged = registry.scrapeWithDmmPriority("KV-302")
+        val nfo = Jsoup.parse(NfoWriter.build(merged), "", Parser.xmlParser())
+        val tags = nfo.select("tag").map { it.text() }
+        assertEquals("Digital title", merged.title)
+        assertEquals(
+            setOf("高清", "Digital tag", "AV", "生中出し", "中出", "吞精", "ノーカット", "フェラ", "竹内夏希", "FS.KnightsVisual"),
+            tags.toSet()
+        )
+        assertEquals(10, tags.size)
+        assertEquals(listOf("单体作品", "中出", "フェラ", "吞精"), nfo.select("genre").map { it.text() })
+    }
+
     @Test fun capturedTagsSurviveFusionAndNfoNormalization() = runBlocking {
         val official = capturedInfo("search")
         val external = ScrapedMovieInfo("AWTN-003", "External title", source = "javlibrary",

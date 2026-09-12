@@ -136,6 +136,54 @@ class DmmScraperTest {
     }
 
     @Test
+    fun capturedKeywordSectionSurvivesNfoNormalization() {
+        val info = scraper.parseDetail(
+            capturedHtml("dvd-keywords-mobile"),
+            "https://www.dmm.co.jp/mono/dvd/-/detail/=/cid=h_955kv302/",
+            "KV-302"
+        )
+        val rawTags = setOf("AV", "生中出し", "中出し", "ごっくん", "ノーカット", "フェラ", "竹内夏希", "FS.KnightsVisual")
+        assertEquals(rawTags, info.tags.toSet())
+        assertEquals(rawTags.size, info.tags.size)
+        assertEquals(listOf("単体作品", "中出し", "フェラ", "ごっくん", "サンプル動画"), info.genres)
+        assertEquals("2025-10-01", info.premiered)
+        assertEquals("96", info.runtime)
+        assertEquals("3.5", info.rating)
+
+        val nfo = org.jsoup.Jsoup.parse(NfoWriter.build(info), "", org.jsoup.parser.Parser.xmlParser())
+        assertEquals(listOf("单体作品", "中出", "フェラ", "吞精"), nfo.select("genre").map { it.text() })
+        assertEquals(
+            setOf("AV", "生中出し", "中出", "吞精", "ノーカット", "フェラ", "竹内夏希", "FS.KnightsVisual"),
+            nfo.select("tag").map { it.text() }.toSet()
+        )
+    }
+
+    @Test
+    fun keywordGroupsPreserveSpacesAndIgnoreUnrelatedLinks() {
+        val info = scraper.parseDetail("""
+            <h1>DVD title</h1>
+            <nav><ul class="box-taglink"><li><a>#Navigation</a></li></ul></nav>
+            <dl><dt>ジャンル</dt><dd><a>Drama</a></dd></dl>
+            <dl><dt>関連タグ</dt><dd><a>First Star</a><a>Legacy tag</a></dd></dl>
+            <section class="area-keyword">
+              <h2 class="ttl-keyword">関連タグ</h2>
+              <ul class="box-taglink">
+                <li><a> #First Star #AV </a></li>
+                <li><a>#AV #Drama</a></li>
+                <li><a> #Drama #AV </a></li>
+                <li><a>#BIGセール #サンプル動画</a></li>
+              </ul>
+              <a>#Unrelated footer</a>
+            </section>
+        """.trimIndent(), "https://www.dmm.co.jp/", "ABC-123")
+
+        assertEquals(listOf("First Star", "Legacy tag", "AV", "Drama", "BIGセール", "サンプル動画"), info.tags)
+        assertEquals(listOf("Drama"), info.genres)
+        val nfo = org.jsoup.Jsoup.parse(NfoWriter.build(info), "", org.jsoup.parser.Parser.xmlParser())
+        assertEquals(listOf("First Star", "Legacy tag", "AV", "Drama"), nfo.select("tag").map { it.text() })
+    }
+
+    @Test
     fun dvdFieldsStayWithinTheirOwnCells() {
         val html = """
             <h1 id="title">DVD title</h1>
@@ -171,6 +219,7 @@ class DmmScraperTest {
         assertEquals("", info.studio)
         assertEquals("", info.series)
         assertEquals("", info.runtime)
+        assertTrue(info.tags.isEmpty())
         assertEquals("2020-01-02", info.premiered)
         assertEquals("https://images.example/cover.jpg", info.posterUrl)
     }

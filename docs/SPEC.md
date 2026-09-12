@@ -124,4 +124,5 @@
 - 旧 DMM 搜索选中新版 video 入口时，按所选 CID 复用 DMM2 结构化详情，不解析客户端空壳；同 CID 已有结果时不再请求详情。CID 必须同时通过番号匹配与返回 ID 校验。用户停用 DMM2 时，旧 DMM 搜索仅选 DVD/租赁，不绕过停用设置查询数字接口。
 - DMM2 类型只读 `ppvContent.genres`；相关标签只读同一详情的 `relatedTags(limit: 50)`，展开 `ContentTagGroup.tags` 和顶层 `ContentTag` 后去重。搜索页 `keywords` 不是详情相关标签，不回查或合并；网页数字分流和 CID 直查共用详情解析。
 - 独立标签允许与类型同名，融合及 NFO 二次规范化不能按同名删除。JavLibrary/JavBus/JavDB 不再复制类型到标签，MissAV 只读独立标签栏；已核实词表、技术标签归类和样片/促销过滤保持原规则，不新增来源优先级或数据库迁移。
-- `D:/Desktop/1.docx` 是用户提供的 AWTN-003 单片证据，不外推其他影片。真实响应与回归边界见 `app/src/test/resources/dmm2/awtn00003-detail.md`；离线回归不等于设备写回或全库字段已通过。
+- DMM 搜索的主商品排序保持不变；同一命中响应中其它 DVD 商品仅在 canonical/og:url 与主商品提供共同作品 ID 时补独立标签。补证只改变 tags，不带入再发行日期、发行商、类型、演员或图片；商品/促销词与不同候选 label 不作为补充标签。重复链接去重，候选失败记录后保留主商品，不新增缓存和重试，不按番号或固定数字前缀特例化。
+- 2026-09-09 的 `D:/Desktop/1.docx` 内容是 AWTN-003 单片证据，真实响应与回归边界见 `app/src/test/resources/dmm2/awtn00003-detail.md`。2026-09-12 同路径已被用户更新为 BONY-062/073 再发行商品证据，见 `app/src/test/resources/dmm/README.md`；证据按日期和实际内容区分，不凭路径沿用旧结论，也不外推其它影片。离线回归不等于设备写回或全库字段已通过。

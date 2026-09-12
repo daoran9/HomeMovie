@@ -1,6 +1,7 @@
 package com.example.localmovielibrary.scraper
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.withContext
 import okhttp3.HttpUrl.Companion.toHttpUrl
@@ -9,6 +10,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Element
+import java.io.IOException
 
 class DmmScraper(
     private val client: OkHttpClient = OkHttpClient(),
@@ -25,24 +27,65 @@ class DmmScraper(
         allowDigital: Boolean = true
     ): ScrapedMovieInfo = withContext(ioDispatcher) {
         val normalized = number.uppercase()
-        val detailUrl = search(normalized, allowDigital)
+        val candidates = search(normalized, allowDigital)
+        val detailUrl = candidates.first()
         val contentId = dmmDigitalContentId(detailUrl)
-        if (contentId != null) {
+        var primaryIdentityIds = emptyList<String>()
+        val primary = if (contentId != null) {
             // New video pages are client-rendered; their metadata comes from the existing detail API.
             if (digitalInfo != null && dmmDigitalContentId(digitalInfo.website) == contentId &&
                 digitalInfo.number.equals(normalized, ignoreCase = true)
             ) {
                 logger?.invoke("DMM 网页命中同一数字商品，复用 DMM2 详情：number=$normalized, contentId=$contentId")
-                return@withContext digitalInfo
+                digitalInfo
+            } else {
+                logger?.invoke("DMM 网页数字商品转结构化详情：number=$normalized, contentId=$contentId")
+                Dmm2Scraper(client, ioDispatcher, logger).scrapeContentId(normalized, contentId)
             }
-            logger?.invoke("DMM 网页数字商品转结构化详情：number=$normalized, contentId=$contentId")
-            return@withContext Dmm2Scraper(client, ioDispatcher, logger).scrapeContentId(normalized, contentId)
+        } else {
+            val html = fetch(detailUrl)
+            primaryIdentityIds = dmmDirectDetailIdentityIds(html)
+            parseDetail(html, detailUrl, normalized)
         }
-        val html = fetch(detailUrl)
-        parseDetail(html, detailUrl, normalized)
+        supplementCandidateTags(primary, contentId?.let(::listOf) ?: primaryIdentityIds, candidates.drop(1))
     }
 
-    private fun search(number: String, allowDigital: Boolean): String {
+    private fun supplementCandidateTags(
+        primary: ScrapedMovieInfo,
+        primaryIdentityIds: List<String>,
+        candidates: List<String>
+    ): ScrapedMovieInfo {
+        // Candidate metadata must never replace the selected product's fields.
+        val tags = primary.tags.toMutableSet()
+        val dvdCandidates = candidates.filter { it.toHttpUrl().encodedPath.startsWith("/mono/dvd/") }
+        logger?.invoke("DMM 同作品标签补证开始：number=${primary.number}, candidates=${dvdCandidates.size}")
+        if (primaryIdentityIds.isNotEmpty()) dvdCandidates.forEach { url ->
+            try {
+                val html = fetch(url)
+                if (dmmDirectDetailIdentityIds(html).none { it in primaryIdentityIds }) {
+                    logger?.invoke("DMM 标签候选未提供共同作品身份，跳过：number=${primary.number}, url=$url")
+                    return@forEach
+                }
+                val candidate = parseDetail(html, url, primary.number)
+                val additions = candidate.tags.filterNot {
+                    isSiteClassification(it) || (it == candidate.publisher && candidate.publisher != primary.publisher)
+                }
+                val previousSize = tags.size
+                tags += additions
+                logger?.invoke("DMM 同作品标签补证完成：number=${primary.number}, url=$url, added=${tags.size - previousSize}")
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: IOException) {
+                logger?.invoke("DMM 标签候选请求失败，保留主商品：number=${primary.number}, url=$url, error=${error.message}")
+            } catch (error: IllegalStateException) {
+                logger?.invoke("DMM 标签候选无有效详情，保留主商品：number=${primary.number}, url=$url, error=${error.message}")
+            }
+        }
+        logger?.invoke("DMM 同作品标签补证结束：number=${primary.number}, added=${tags.size - primary.tags.toSet().size}")
+        return if (tags == primary.tags.toSet()) primary else primary.copy(tags = tags.toList())
+    }
+
+    private fun search(number: String, allowDigital: Boolean): List<String> {
         logger?.invoke("DMM 全部搜索开始：number=$number")
         val searchDestinations = mutableListOf<String>()
         for ((requestName, url) in dmmWebSearchRequests(number)) {
@@ -51,12 +94,13 @@ class DmmScraper(
                 destination = dmmResponseDestination(finalUrl)
                 searchDestinations += "$requestName=$destination"
             }
-            val link = selectDetailUrl(html, number, allowDigital)
-            if (!link.isNullOrBlank()) {
+            val links = selectDetailUrls(html, number, allowDigital)
+            if (links.isNotEmpty()) {
                 logger?.invoke(
-                    "DMM 全部搜索命中：number=$number, request=$requestName, destination=$destination"
+                    "DMM 全部搜索命中：number=$number, request=$requestName, destination=$destination, " +
+                        "candidates=${links.size}, selected=${links.first()}"
                 )
-                return link
+                return links
             }
         }
         if (!allowDigital) error("DMM 数字来源已停用，未找到可用 DVD/租赁详情：$number")
@@ -94,7 +138,7 @@ class DmmScraper(
                     "DMM CID 直查命中：number=$number, requestedCid=$contentId, " +
                         "identityIds=${identityIds.joinToString()}"
                 )
-                return url
+                return listOf(url)
             }
         }
         logger?.invoke(
@@ -115,7 +159,10 @@ class DmmScraper(
      * 1) 提取普通视频和 DVD 详情链接，明确排除 TV Plus 和非 DMM 主机。
      * 2) 先按完整番号评分，再优先选择当前 video 商品入口。
      */
-    internal fun selectDetailUrl(html: String, number: String, allowDigital: Boolean = true): String? {
+    internal fun selectDetailUrl(html: String, number: String, allowDigital: Boolean = true): String? =
+        selectDetailUrls(html, number, allowDigital).firstOrNull()
+
+    private fun selectDetailUrls(html: String, number: String, allowDigital: Boolean): List<String> {
         val keyword = normalizeDmmSearchKeyword(number)
         val cidPattern = Regex("""(?:cid=|[?&]id=)([^/?&"']+)""", RegexOption.IGNORE_CASE)
         return Regex(
@@ -142,8 +189,13 @@ class DmmScraper(
                 detailUrl.takeIf { matchScore >= 850 && routePriority > 0 && (allowDigital || routePriority < 200) }
                     ?.let { Triple(it, matchScore, routePriority) }
             }
-            .maxByOrNull { (_, matchScore, routePriority) -> matchScore * 10_000 + routePriority }
-            ?.first
+            .sortedByDescending { (_, matchScore, routePriority) -> matchScore * 10_000 + routePriority }
+            .map { it.first }
+            .distinctBy { link ->
+                val url = link.toHttpUrl()
+                if (dmmDigitalContentId(link) == null) url.newBuilder().query(null).build() else url
+            }
+            .toList()
     }
 
     internal fun parseDetail(html: String, detailUrl: String, number: String): ScrapedMovieInfo {
@@ -193,13 +245,19 @@ class DmmScraper(
          * 步骤2：分离官方类型与相关标签
          * ==============================================================================
          * 目标：保留 DMM 页面两个独立字段，避免把ジャンル复制成関連タグ。
-         * 数据源：详情页的“ジャンル”和“関連タグ”节点。
+         * 数据源：详情页的“ジャンル”、“関連タグ”字段及 area-keyword 标签区。
          * 操作：
          * 1) 类型只写入 genres。
-         * 2) 相关标签只写入 tags。
+         * 2) 相关标签组按 # 边界展开，只写入 tags，保留标签内部空格。
          */
+        logger?.invoke("开始解析 DMM 分类与相关标签：number=$number")
         val genres = links("ジャンル")
-        val relatedTags = links("関連タグ")
+        val relatedTags = (links("関連タグ") + document.select("section.area-keyword .box-taglink a").map { it.text() })
+            .flatMap { group -> group.split(Regex("\\s+#")) }
+            .map { it.trim().removePrefix("#").trim() }
+            .filter { it.isNotBlank() }
+            .distinct()
+        logger?.invoke("DMM 分类与相关标签解析完成：number=$number, genres=${genres.size}, relatedTags=${relatedTags.size}")
         val actors = Regex("""<(?:span|td)[^>]+(?:id=["']performer["']|id=["']fn-visibleActor["'])[\s\S]*?</(?:span|td)>""", RegexOption.IGNORE_CASE)
             .find(html)?.value
             ?.let { linksIn(it) }
