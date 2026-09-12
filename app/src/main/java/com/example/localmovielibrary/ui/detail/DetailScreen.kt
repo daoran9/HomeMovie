@@ -1,6 +1,7 @@
 ﻿package com.example.localmovielibrary.ui.detail
 
 import android.net.Uri
+import android.widget.Toast
 import android.annotation.SuppressLint
 import android.webkit.CookieManager
 import android.webkit.WebView
@@ -179,6 +180,7 @@ fun DetailScreen(
                     playbackParts = playbackParts,
                     actorAvatarRefreshVersion = actorAvatarRefreshVersion,
                     onPlay = { part -> onPlay(part.videoUri, it.title, part.fileName) },
+                    onTrailer = { url -> onPlay(url, "${it.title} - 预告", "trailer.m3u8") },
                     onToggleFavorite = viewModel::toggleFavorite,
                     onToggleWatched = viewModel::toggleWatched,
                     onShowPaths = {
@@ -277,6 +279,7 @@ fun MovieDetailScreen(
     playbackParts: List<MoviePlaybackPart>,
     actorAvatarRefreshVersion: Int,
     onPlay: (MoviePlaybackPart) -> Unit,
+    onTrailer: (String) -> Unit,
     onToggleFavorite: () -> Unit,
     onToggleWatched: () -> Unit,
     onShowPaths: () -> Unit,
@@ -308,6 +311,7 @@ fun MovieDetailScreen(
     similarMovies: List<MovieEntity>,
     onSimilarClick: (Long) -> Unit
 ) {
+    val context = LocalContext.current
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -345,7 +349,11 @@ fun MovieDetailScreen(
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 MobileTitleBlock(movie = movie, onGenreClick = onGenreClick)
-                MobileMainButtons(playbackParts = playbackParts, onPlay = onPlay, onTrailer = onShowNfo)
+                MobileMainButtons(playbackParts = playbackParts, onPlay = onPlay, onTrailer = {
+                    movie.trailer?.takeIf { it.isNotBlank() }?.let { url ->
+                        onTrailer(url)
+                    } ?: Toast.makeText(context, "暂无预告", Toast.LENGTH_SHORT).show()
+                })
                 MobileActionBar(
                     movie = movie,
                     onDownload = onShowPaths,
@@ -470,7 +478,7 @@ private fun MobileTitleBlock(movie: MovieEntity, onGenreClick: (String) -> Unit)
         MetadataLine(movie)
         if (movie.genres.isNotEmpty()) {
             FlowRow(horizontalArrangement = Arrangement.spacedBy(7.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
-                movie.genres.take(4).forEach { genre ->
+                movie.genres.forEach { genre ->
                     Text(
                         text = genre,
                         color = Color.White.copy(alpha = 0.84f),
@@ -834,7 +842,7 @@ private fun ReleaseAndOverview(movie: MovieEntity, onTagClick: (String) -> Unit)
             )
         }
         if (movie.tags.isNotEmpty()) {
-            ChipFlow(values = movie.tags.take(8), onClick = onTagClick)
+            ChipFlow(values = movie.tags, onClick = onTagClick)
         }
     }
 }
@@ -1047,6 +1055,7 @@ private fun OtherInfoSection(
         InfoLine("媒体信息", listOfNotNull(movie.videoName, movie.runtimeMinutes?.let { "${it}分钟" }).joinToString(" / "))
         InfoLine("系列", movie.series.orEmpty())
         InfoLine("工作室", movie.studios.joinToString(", "))
+        InfoLine("发行厂牌", movie.publisher.orEmpty())
         InfoLine("路径信息", readableFolderPath(movie.videoUri))
         InfoLine("添加时间", formatAddedTime(movie.scannedAtMillis))
     }

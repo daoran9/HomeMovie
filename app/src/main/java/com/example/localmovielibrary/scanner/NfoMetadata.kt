@@ -10,11 +10,15 @@ data class NfoMetadata(
     val runtimeMinutes: Int? = null,
     val mpaa: String? = null,
     val studios: List<String> = emptyList(),
+    val publisher: String? = null,
     val series: String? = null,
     val directors: List<String> = emptyList(),
     val actors: List<String> = emptyList(),
+    val actorCredits: Map<String, List<String>> = emptyMap(),
+    val actorThumbs: Map<String, String> = emptyMap(),
     val genres: List<String> = emptyList(),
     val tags: List<String> = emptyList(),
     val rating: Double? = null,
+    val trailer: String? = null,
     val uniqueIds: List<String> = emptyList()
 )

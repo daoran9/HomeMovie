@@ -57,9 +57,20 @@ class OfficialScraper(
             .trim()
         val publisherAndStudio = publisherAndStudio(html)
         val studio = publisherAndStudio.second.ifBlank { plainTextAfterLabel(html, "製作商") }
-        val tags = linkTextsAfterLabel(html, "ジャンル")
+        /*
+         * ==============================================================================
+         * 步骤2：分离官方类型与相关标签
+         * ==============================================================================
+         * 目标：保留 FANZA/DMM 官方页面的ジャンル与関連タグ原始边界。
+         * 数据源：详情页标签后的链接集合。
+         * 操作：
+         * 1) 类型进入 genres。
+         * 2) 相关标签进入 tags，不用类型代替。
+         */
+        val genres = linkTextsAfterLabel(html, "ジャンル")
             .filterNot { it == "Blu-ray（ブルーレイ）" }
             .distinct()
+        val relatedTags = linkTextsAfterLabel(html, "関連タグ").distinct()
         val actors = Regex(
             """<a(?=[^>]*class=["'][^"']*\bc-tag\b[^"']*["'])(?=[^>]*href=["'][^"']*/actress/[^"']*["'])[^>]*>([\s\S]*?)</a>""",
             RegexOption.IGNORE_CASE
@@ -84,8 +95,8 @@ class OfficialScraper(
             series = firstLinkTextAfterLabel(html, "シリーズ"),
             directors = listOfNotNull(directorAfterLabel(html).takeIf { it.isNotBlank() }),
             actors = actors,
-            genres = tags,
-            tags = tags,
+            genres = genres,
+            tags = relatedTags,
             trailer = Regex("""<div[^>]*class=["'][^"']*\bvideo\b[^"']*["'][\s\S]*?<video[^>]+src=["']([^"']+)["']""", RegexOption.IGNORE_CASE)
                 .find(html)?.groupValues?.get(1).orEmpty(),
             website = detailUrl,

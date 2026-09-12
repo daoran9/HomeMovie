@@ -18,8 +18,11 @@ class NfoParser(private val contentResolver: ContentResolver) {
 
     private fun parseMovie(parser: XmlPullParser): NfoMetadata {
         val studios = mutableListOf<String>()
+        var publisher: String? = null
         val directors = mutableListOf<String>()
         val actors = mutableListOf<String>()
+        val actorCredits = linkedMapOf<String, MutableList<String>>()
+        val actorThumbs = linkedMapOf<String, String>()
         val genres = mutableListOf<String>()
         val tags = mutableListOf<String>()
         val uniqueIds = mutableListOf<String>()
@@ -35,6 +38,7 @@ class NfoParser(private val contentResolver: ContentResolver) {
         var mpaa: String? = null
         var series: String? = null
         var rating: Double? = null
+        var trailer: String? = null
 
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
             if (parser.eventType != XmlPullParser.START_TAG) continue
@@ -49,7 +53,8 @@ class NfoParser(private val contentResolver: ContentResolver) {
                 "runtime" -> runtime = parser.readText().extractFirstInt()
                 "mpaa" -> mpaa = parser.readText()
                 "certification" -> mpaa = parser.readText()
-                "studio", "maker", "publisher", "label" -> studios += parser.readText().splitMultiValue()
+                "studio", "maker" -> studios += parser.readText().splitMultiValue()
+                "publisher", "label" -> if (publisher.isNullOrBlank()) publisher = parser.readText().clean()
                 "series", "set" -> series = parser.readText()
                 "director" -> directors += parser.readText().splitMultiValue()
                 "genre" -> genres += parser.readText().splitMultiValue()
@@ -62,13 +67,18 @@ class NfoParser(private val contentResolver: ContentResolver) {
                     }
                 }
                 "rating" -> rating = parseRating(parser) ?: rating
+                "trailer" -> trailer = parser.readText().clean()
                 "uniqueid" -> {
                     val type = parser.getAttributeValue(null, "type")
                     val value = parser.readText()
                     if (value.isNotBlank()) uniqueIds += listOfNotNull(type?.takeIf { it.isNotBlank() }, value)
                         .joinToString(":")
                 }
-                "actor" -> parseActor(parser)?.let { actors += it }
+                "actor" -> parseActor(parser)?.let { actor ->
+                    actors += actor.name
+                    if (actor.roles.isNotEmpty()) actorCredits.getOrPut(actor.name) { mutableListOf() }.addAll(actor.roles)
+                    actor.thumb?.let { actorThumbs[actor.name] = it }
+                }
             }
         }
 
@@ -84,26 +94,40 @@ class NfoParser(private val contentResolver: ContentResolver) {
             runtimeMinutes = runtime,
             mpaa = mpaa.clean(),
             studios = studios.cleanedDistinct(),
+            publisher = publisher,
             series = series.clean(),
             directors = directors.cleanedDistinct(),
             actors = actors.cleanedDistinct(),
+            actorCredits = actorCredits.mapValues { (_, roles) -> roles.map { it.trim() }.filter { it.isNotBlank() }.distinct() },
+            actorThumbs = actorThumbs.toMap(),
             genres = genres.cleanedDistinct(),
             tags = tags.cleanedDistinct(),
             rating = rating,
+            trailer = trailer,
             uniqueIds = uniqueIds.cleanedDistinct()
         )
     }
 
-    private fun parseActor(parser: XmlPullParser): String? {
+    private data class ParsedActor(val name: String, val roles: List<String>, val thumb: String?)
+
+    private fun parseActor(parser: XmlPullParser): ParsedActor? {
         val depth = parser.depth
         var name: String? = null
+        var thumb: String? = null
+        val roles = mutableListOf<String>()
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
             if (parser.eventType == XmlPullParser.END_TAG && parser.depth == depth) break
             if (parser.eventType == XmlPullParser.START_TAG && parser.name.equals("name", ignoreCase = true)) {
                 name = parser.readText()
             }
+            if (parser.eventType == XmlPullParser.START_TAG && parser.name.equals("role", ignoreCase = true)) {
+                roles += parser.readText()
+            }
+            if (parser.eventType == XmlPullParser.START_TAG && parser.name.equals("thumb", ignoreCase = true)) {
+                thumb = parser.readText()
+            }
         }
-        return name.clean()
+        return name.clean()?.let { ParsedActor(it, roles, thumb.clean()) }
     }
 
     private fun parseRating(parser: XmlPullParser): Double? {

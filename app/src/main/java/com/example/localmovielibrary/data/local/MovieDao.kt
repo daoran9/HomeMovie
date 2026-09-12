@@ -17,7 +17,7 @@ interface MovieDao {
         SELECT 
             id, videoUri, videoName, sortTitle, title, originalTitle,
             year, premiered, runtimeMinutes, mpaa, rating,
-            posterUri, fanartUri, thumbUri,
+            posterUri, fanartUri, thumbUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         ORDER BY sortTitle COLLATE NOCASE
@@ -34,7 +34,7 @@ interface MovieDao {
         SELECT 
             id, videoUri, videoName, sortTitle, title, originalTitle,
             year, premiered, runtimeMinutes, mpaa, rating,
-            posterUri, fanartUri, thumbUri,
+            posterUri, fanartUri, thumbUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE isFavorite = 1
@@ -81,7 +81,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE id = :id
@@ -95,7 +95,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE videoUri = :videoUri
@@ -110,7 +110,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE libraryRootUri = :rootUri
@@ -124,7 +124,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE libraryRootUri = :rootUri
@@ -143,7 +143,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             studios, series, directors, actors, genres, tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         """
@@ -156,7 +156,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             studios, series, directors, actors, genres, tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE isFavorite = 1
@@ -171,7 +171,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE actors LIKE :pattern
@@ -185,7 +185,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE tags LIKE :pattern
@@ -199,7 +199,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE genres LIKE :pattern
@@ -213,7 +213,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE studios LIKE :pattern
@@ -227,7 +227,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE series LIKE :pattern
@@ -241,7 +241,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE actors LIKE :pattern
@@ -255,7 +255,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE videoName LIKE :pattern OR title LIKE :pattern OR originalTitle LIKE :pattern
@@ -269,7 +269,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         """
@@ -282,7 +282,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE 
@@ -299,7 +299,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE title LIKE :pattern OR originalTitle LIKE :pattern OR videoName LIKE :pattern OR CAST(year AS TEXT) LIKE :pattern
@@ -314,7 +314,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE actors LIKE :pattern
@@ -329,7 +329,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE tags LIKE :pattern
@@ -344,7 +344,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE genres LIKE :pattern
@@ -359,7 +359,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE studios LIKE :pattern
@@ -374,7 +374,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE series LIKE :pattern
@@ -389,7 +389,7 @@ interface MovieDao {
             id, libraryRootUri, videoUri, videoName, sortTitle, title, originalTitle,
             NULL AS plot, NULL AS outline, year, premiered, runtimeMinutes, mpaa,
             '' AS studios, series, '' AS directors, '' AS actors, '' AS genres, '' AS tags, rating,
-            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri,
+            '' AS uniqueIds, posterUri, fanartUri, thumbUri, nfoUri, publisher, trailer,
             scannedAtMillis, isFavorite, isWatched, updatedAt
         FROM movies
         WHERE CAST(year AS TEXT) = :year

@@ -7,6 +7,13 @@ import org.junit.Test
 
 class NfoWriterTest {
     @Test
+    fun buildOmitsMissingAndInvalidRatingsButKeepsPositiveRatings() {
+        listOf("", "0", "0.0", " 0.00 ", "null", "NaN", "Infinity", "-1").forEach { rating ->
+            assertFalse(NfoWriter.build(ScrapedMovieInfo(number = "LOCK-014", title = "Test", rating = rating)).contains("<rating>"))
+        }
+        assertTrue(NfoWriter.build(ScrapedMovieInfo(number = "ABC-123", title = "Test", rating = "4.43")).contains("<rating>4.43</rating>"))
+    }
+    @Test
     fun buildCleansNarrativeTextAndUsesTheNonBlankPlotField() {
         val nfo = NfoWriter.build(
             ScrapedMovieInfo(

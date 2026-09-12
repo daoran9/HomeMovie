@@ -6,7 +6,7 @@ import androidx.room.TypeConverters
 
 @Database(
     entities = [MovieEntity::class, DirectLinkEntity::class, PlaybackProgressEntity::class, CloudStrmRecordEntity::class, DomesticMovieEntity::class, DomesticVideoSourceEntity::class],
-    version = 12,
+    version = 13,
     exportSchema = false
 )
 @TypeConverters(MovieTypeConverters::class)

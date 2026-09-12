@@ -39,6 +39,7 @@ class AppContainer(context: Context) {
         MIGRATION_9_10,
         MIGRATION_10_11,
         MIGRATION_11_12
+        ,MIGRATION_12_13
     ).build()
 
     val scanner = LibraryScanner(appContext)
@@ -242,6 +243,13 @@ class AppContainer(context: Context) {
         val MIGRATION_11_12 = object : Migration(11, 12) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("UPDATE cloud_strm_records SET partLabel = NULL WHERE UPPER(partLabel) = 'C'")
+            }
+        }
+
+        val MIGRATION_12_13 = object : Migration(12, 13) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE movies ADD COLUMN publisher TEXT")
+                db.execSQL("ALTER TABLE movies ADD COLUMN trailer TEXT")
             }
         }
     }

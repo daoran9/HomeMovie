@@ -4,7 +4,11 @@ import com.example.localmovielibrary.util.cleanMetadataText
 
 object NfoWriter {
     fun build(info: ScrapedMovieInfo): String = buildString {
+        check(info.actors.isNotEmpty() || info.unverifiedActorNames.isEmpty()) {
+            "演员身份待核，不能写成已确认 NFO：${info.number}"
+        }
         val canonicalInfo = info.canonicalizeActorIdentities()
+        val classifications = mergeMovieClassifications(listOf(info))
         val plot = info.plot.cleanMetadataText()
         val outline = info.outline.cleanMetadataText()
         appendLine("""<?xml version="1.0" encoding="utf-8"?>""")
@@ -17,14 +21,16 @@ object NfoWriter {
         tag("outline", outline.ifBlank { plot })
         tag("premiered", info.premiered)
         tag("releasedate", info.premiered)
-        tag("year", info.year)
+        tag("year", Regex("""^\d{4}""").find(info.premiered)?.value ?: info.year)
         tag("runtime", info.runtime)
         tag("studio", info.studio)
         tag("maker", info.studio)
         tag("publisher", info.publisher)
         tag("label", info.publisher)
         tag("series", info.series)
-        tag("rating", info.rating)
+        info.rating.trim().takeIf { value ->
+            value.toDoubleOrNull()?.let { it.isFinite() && it > 0 } == true
+        }?.let { tag("rating", it) }
         tag("trailer", info.trailer, normalizeText = false)
         tag("website", info.website, normalizeText = false)
         tag("source", info.source, normalizeText = false)
@@ -33,11 +39,13 @@ object NfoWriter {
         info.posterUrl.takeIf { it.isUsableMovieImageUrl() }
             ?.let { tag("poster", it, normalizeText = false) }
         info.directors.normalizedValues().forEach { tag("director", it) }
-        info.genres.normalizedValues().forEach { tag("genre", it) }
-        info.tags.normalizedValues().forEach { tag("tag", it) }
+        classifications.genres.normalizedValues().forEach { tag("genre", it) }
+        classifications.tags.normalizedValues().forEach { tag("tag", it) }
         canonicalInfo.actors.normalizedValues().forEach { actor ->
             appendLine("  <actor>")
             tag("name", canonicalInfo.actorDisplayName(actor), indent = "    ")
+            canonicalInfo.actorCredits.filterKeys { actorNamesHaveExactVariant(it, actor) }
+                .values.flatten().distinct().forEach { tag("role", it, indent = "    ") }
             canonicalInfo.actorImageUrls[actor]
                 ?.takeIf(::isActorIdentityImageUrl)
                 ?.let { tag("thumb", it, indent = "    ", normalizeText = false) }
@@ -203,6 +211,8 @@ object NfoWriter {
         append("    <name>")
         append(actorDisplayName(actor).escapeXml())
         appendLine("</name>")
+        actorCredits.filterKeys { actorNamesHaveExactVariant(it, actor) }.values.flatten().distinct()
+            .forEach { tag("role", it, indent = "    ") }
         actorImageUrls[actor]?.takeIf(::isActorIdentityImageUrl)?.let { imageUrl ->
             append("    <thumb>")
             append(imageUrl.escapeXml())
